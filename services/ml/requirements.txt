@@ -1,0 +1,11 @@
+transformers>=4.40.0
+torch>=2.2.0
+chromadb>=0.4.0
+flask>=3.0.0
+sentence-transformers>=2.7.0
+huggingface_hub>=0.23.0
+python-dotenv>=1.0.0
+
+# scispaCy requires Python 3.11 or 3.12 (not 3.13). Install after venv with 3.11:
+# pip install scispacy
+# pip install https://s3-us-west-2.amazonaws.com/ai2-s2-scispacy/releases/v0.5.4/en_core_sci_sm-0.5.4.tar.gz

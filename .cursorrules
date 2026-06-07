@@ -1,0 +1,45 @@
+# shebok.ai — Cursor Rules
+
+## Project
+Bangladesh-first AI healthcare navigator. WhatsApp triage + conversational booking + doctor portal.
+Stack: Next.js · Supabase · n8n · Groq · Together.ai · BanglaBERT · BioBERT · ChromaDB/pgvector.
+
+## TypeScript / Next.js
+- TypeScript strict mode always. No `any` — use `unknown` + Zod narrowing.
+- Next.js 14+ App Router. Server Components by default; `"use client"` only when needed.
+- Use `@/` import alias. Match existing shadcn/ui patterns in `apps/portal`.
+- Validate all external JSON (LLM outputs, webhooks, DB writes) with Zod schemas before use.
+
+## Database (Supabase)
+- Never store raw phone numbers or NID — SHA-256 hash at ingestion only.
+- `SUPABASE_SERVICE_ROLE_KEY` only in n8n workflows and Next.js server routes — never client bundles.
+- All tables use RLS. Doctors query only their specialty + institution records.
+- Use generated types from `apps/portal/src/types/database.types.ts` once schema exists.
+- pgvector embeddings are 384-dim (S-PubMedBert-MS-MARCO).
+
+## LLM Pipeline Rules
+1. BanglaBERT: MEDICAL vs CHITCHAT only — not emergency detection.
+2. Meditron-7B: outputs JSON `{ emergency_detected: boolean, primary_clinical_observation: string }`.
+3. DeepSeek-R1: triage nurse persona (no diagnoses, no drug dosages). Strip `` blocks before patient text or DB insert.
+4. BioBERT: runs ONLY after `triage_complete` — input is full conversation transcript, not single turns.
+5. Malformed LLM output → schema validation gate → auto-retry once → deterministic fallback. Never write broken data.
+
+## n8n Workflows
+- PII scrub (SHA-256) before any external API call.
+- Emergency branch terminates pipeline — no DeepSeek, no booking nodes.
+- Conversation state in Supabase JSON buffer, 24hr TTL.
+
+## Security
+- No secrets in code, commits, or client-side env (`NEXT_PUBLIC_` only for anon-safe values).
+- Patient text wrapped in delimiters before LLM calls (prompt injection guard).
+- Open-weights models only in patient pipeline — no OpenAI/Anthropic for live triage.
+
+## File layout
+- `apps/portal/` — Next.js doctor portal
+- `services/ml/` — BanglaBERT + BioBERT Flask endpoints
+- `services/n8n/` — Docker compose for local n8n
+- `.env.local` at repo root — single source of truth for local dev
+
+## Style
+- Minimal diffs. Reuse existing abstractions. No over-engineering.
+- Comments only for non-obvious clinical or pipeline logic.
