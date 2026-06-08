@@ -1,0 +1,140 @@
+{
+  "name": "shebok — Full Triage Pipeline (v3 - Native WhatsApp)",
+  "nodes": [
+    {
+      "parameters": {
+        "updates": [
+          "messages"
+        ],
+        "options": {}
+      },
+      "id": "whatsapp-trigger",
+      "name": "WhatsApp Trigger",
+      "type": "n8n-nodes-base.whatsAppTrigger",
+      "typeVersion": 1,
+      "position": [0, 0]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json;\n\n// Handle different ways n8n native node might format the data\nlet text = '';\nif (typeof body.text === 'object' && body.text !== null) {\n  text = body.text.body || '';\n} else {\n  text = body.text || body.message || body.body || '';\n}\n\nlet from = body.from || body.waId || body.sender || '';\n\n// Skip empty or status updates\nif (!from || !text) {\n  return [{ json: { skip: true } }];\n}\n\nreturn [{\n  json: {\n    skip: false,\n    phone_number: from,\n    message_text: text,\n    message_type: 'text'\n  }\n}];"
+      },
+      "id": "parse-trigger",
+      "name": "Parse Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict"
+          },
+          "conditions": [
+            {
+              "id": "not-skip",
+              "leftValue": "={{ $json.skip }}",
+              "rightValue": false,
+              "operator": {
+                "type": "boolean",
+                "operation": "false"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-valid-message",
+      "name": "Valid Message?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [440, 0]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5004/message",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ phone_number: $('Parse Payload').item.json.phone_number, message_text: $('Parse Payload').item.json.message_text, message_type: $('Parse Payload').item.json.message_type }) }}",
+        "options": {
+          "timeout": 30000
+        }
+      },
+      "id": "triage-service",
+      "name": "Triage Service",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 0]
+    },
+    {
+      "parameters": {
+        "operation": "send",
+        "phoneNumberId": "1197660833424864",
+        "recipientPhoneNumber": "={{ $('Parse Payload').item.json.phone_number }}",
+        "textBody": "={{ $json.response_text }}",
+        "additionalFields": {}
+      },
+      "id": "send-whatsapp",
+      "name": "Send WhatsApp Reply",
+      "type": "n8n-nodes-base.whatsApp",
+      "typeVersion": 1.1,
+      "position": [880, 0]
+    }
+  ],
+  "connections": {
+    "WhatsApp Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Payload",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Payload": {
+      "main": [
+        [
+          {
+            "node": "Valid Message?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Valid Message?": {
+      "main": [
+        [
+          {
+            "node": "Triage Service",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Triage Service": {
+      "main": [
+        [
+          {
+            "node": "Send WhatsApp Reply",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "meta": {
+    "description": "Triage pipeline using NATIVE WhatsApp Trigger and Send nodes instead of raw Webhooks."
+  }
+}

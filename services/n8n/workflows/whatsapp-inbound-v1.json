@@ -1,0 +1,159 @@
+{
+  "name": "shebok — WhatsApp Inbound (v1 stub)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "GET,POST",
+        "path": "whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "webhook-whatsapp",
+      "name": "WhatsApp Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "shebok-whatsapp"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "verify-get",
+              "leftValue": "={{ $json.query['hub.mode'] }}",
+              "rightValue": "subscribe",
+              "operator": { "type": "string", "operation": "equals" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-meta-verify",
+      "name": "Meta Verify GET?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [220, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.query['hub.challenge'] }}",
+        "options": { "responseCode": 200 }
+      },
+      "id": "respond-challenge",
+      "name": "Return hub.challenge",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [440, -120]
+    },
+    {
+      "parameters": {
+        "jsCode": "const body = $input.first().json.body ?? {};\nconst entry = body.entry?.[0];\nconst change = entry?.changes?.[0];\nconst value = change?.value ?? {};\nconst msg = value.messages?.[0] ?? {};\nconst contact = value.contacts?.[0] ?? {};\n\nlet messageType = msg.type ?? 'unknown';\nlet text = '';\nlet mediaId = null;\n\nif (messageType === 'text') {\n  text = msg.text?.body ?? '';\n} else if (messageType === 'audio') {\n  mediaId = msg.audio?.id ?? null;\n}\n\nconst crypto = require('crypto');\nconst from = msg.from ?? '';\nconst phoneHash = crypto.createHash('sha256').update(from).digest('hex');\n\nreturn [{\n  json: {\n    message_type: messageType,\n    from_phone: from,\n    whatsapp_hash: phoneHash,\n    text,\n    media_id: mediaId,\n    contact_name: contact.profile?.name ?? null,\n    raw: body\n  }\n}];"
+      },
+      "id": "parse-whatsapp",
+      "name": "Parse WhatsApp Payload",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://host.docker.internal:5003/check",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ text: $json.text }) }}",
+        "options": {}
+      },
+      "id": "emergency-gate",
+      "name": "Emergency Gate",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [660, 80]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": { "caseSensitive": true, "leftValue": "", "typeValidation": "strict" },
+          "conditions": [
+            {
+              "id": "emergency-true",
+              "leftValue": "={{ $json.emergency_detected }}",
+              "rightValue": true,
+              "operator": { "type": "boolean", "operation": "true" }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "if-emergency",
+      "name": "Emergency?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [880, 80]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "=https://graph.facebook.com/{{ $env.WHATSAPP_API_VERSION }}/{{ $env.WHATSAPP_PHONE_NUMBER_ID }}/messages",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"messaging_product\": \"whatsapp\",\n  \"to\": \"{{ $('Parse WhatsApp Payload').item.json.from_phone }}\",\n  \"type\": \"text\",\n  \"text\": { \"body\": \"জরুরি অবস্থা সনাক্ত হয়েছে। অনুগ্রহ করে অবিলম্বে ৯৯৯ এ কল করুন।\" }\n}",
+        "options": {}
+      },
+      "id": "send-emergency-wa",
+      "name": "Send 999 Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1100, -20]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={ \"ok\": true }",
+        "options": { "responseCode": 200 }
+      },
+      "id": "respond-ok",
+      "name": "Respond 200",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1100, 180]
+    }
+  ],
+  "connections": {
+    "WhatsApp Webhook": {
+      "main": [[{ "node": "Meta Verify GET?", "type": "main", "index": 0 }]]
+    },
+    "Meta Verify GET?": {
+      "main": [
+        [{ "node": "Return hub.challenge", "type": "main", "index": 0 }],
+        [{ "node": "Parse WhatsApp Payload", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse WhatsApp Payload": {
+      "main": [[{ "node": "Emergency Gate", "type": "main", "index": 0 }]]
+    },
+    "Emergency Gate": {
+      "main": [[{ "node": "Emergency?", "type": "main", "index": 0 }]]
+    },
+    "Emergency?": {
+      "main": [
+        [{ "node": "Send 999 Alert", "type": "main", "index": 0 }],
+        [{ "node": "Respond 200", "type": "main", "index": 0 }]
+      ]
+    },
+    "Send 999 Alert": {
+      "main": [[{ "node": "Respond 200", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": { "executionOrder": "v1" },
+  "meta": {
+    "description": "Import into n8n. Wire WhatsApp Cloud API webhook to {N8N_WEBHOOK_URL}/webhook/whatsapp. Configure HTTP Header Auth credential: Authorization Bearer {WHATSAPP_ACCESS_TOKEN}. On Mac Docker, emergency gate uses host.docker.internal:5003."
+  }
+}

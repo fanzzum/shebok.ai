@@ -1,0 +1,49 @@
+WhatsApp Cloud API + n8n + ngrok (no Twilio, no Cloudflare)
+=============================================================
+
+YOUR SETUP (confirmed working pattern)
+- n8n in Docker on host port 80  →  http://localhost:80
+- ngrok exposes port 80 to the internet
+- n8n native WhatsApp node OR webhook workflow
+
+1. Keys in .env.local (repo root)
+   WHATSAPP_ACCESS_TOKEN
+   WHATSAPP_PHONE_NUMBER_ID
+   WHATSAPP_BUSINESS_ACCOUNT_ID
+   WHATSAPP_VERIFY_TOKEN=shebok_webhook_verify
+
+   SUPABASE URL must be project root only:
+   https://YOUR_PROJECT.supabase.co
+   (NOT .../rest/v1/)
+
+2. Start ngrok (keep this terminal open)
+   ngrok http 80
+
+   Copy the https URL, e.g. https://abc123.ngrok-free.app
+
+3. Save tunnel URL in .env.local
+   NGROK_URL=https://abc123.ngrok-free.app
+   N8N_WEBHOOK_URL=https://abc123.ngrok-free.app
+
+4. Meta webhook (if using webhook trigger, not only n8n WhatsApp credential)
+   developers.facebook.com → App → WhatsApp → Configuration
+   Callback URL: {NGROK_URL}/webhook/whatsapp
+   Verify token: shebok_webhook_verify
+   Subscribe: messages
+
+   If using n8n WhatsApp Business Cloud credentials + trigger node,
+   follow n8n UI for OAuth/credential setup instead.
+
+5. Start AI services (separate terminal)
+   cd /path/to/shebok.ai
+   make services-up
+
+6. Import extended workflow (optional — adds emergency gate)
+   n8n → Import → services/n8n/workflows/whatsapp-inbound-v1.json
+   Emergency gate URL in workflow: http://host.docker.internal:5003/check
+
+7. Verify
+   make smoke
+   Send WhatsApp test message → check n8n Executions
+
+Note: ngrok free URLs change when you restart ngrok — update Meta webhook + .env.local.

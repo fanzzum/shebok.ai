@@ -42,7 +42,7 @@ CREATE TABLE IF NOT EXISTS triage_records (
   deepseek_summary TEXT,
   urgency_score INT CHECK (urgency_score BETWEEN 1 AND 5),
   department TEXT,
-  meditron_observation TEXT,
+  clinical_observation TEXT,
   embedding vector(384),
   doctor_feedback TEXT CHECK (doctor_feedback IN ('correct', 'wrong', 'partial')),
   status TEXT DEFAULT 'pending' CHECK (status IN ('pending', 'booked', 'resolved')),

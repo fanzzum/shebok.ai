@@ -2,7 +2,13 @@
 
 ## Project
 Bangladesh-first AI healthcare navigator. WhatsApp triage + conversational booking + doctor portal.
-Stack: Next.js · Supabase · n8n · Groq · Together.ai · BanglaBERT · BioBERT · ChromaDB/pgvector.
+Stack: Next.js · Supabase · n8n · Groq · WhatsApp Cloud API · BanglaBERT · BioBERT · ChromaDB/pgvector.
+
+## Architecture (v2.1 — no Twilio, no Meditron)
+- **WhatsApp**: Meta WhatsApp Cloud API via n8n WhatsApp Business Cloud node (not Twilio).
+- **Emergency detection**: (1) sync keyword hard gate, then (2) DeepSeek-R1 via Groq — same JSON schema Meditron used.
+- **Triage + booking**: DeepSeek-R1 via Groq with separate system prompts.
+- **Chitchat gate**: BanglaBERT local endpoint only.
 
 ## TypeScript / Next.js
 - TypeScript strict mode always. No `any` — use `unknown` + Zod narrowing.
@@ -14,32 +20,31 @@ Stack: Next.js · Supabase · n8n · Groq · Together.ai · BanglaBERT · BioBER
 - Never store raw phone numbers or NID — SHA-256 hash at ingestion only.
 - `SUPABASE_SERVICE_ROLE_KEY` only in n8n workflows and Next.js server routes — never client bundles.
 - All tables use RLS. Doctors query only their specialty + institution records.
-- Use generated types from `apps/portal/src/types/database.types.ts` once schema exists.
 - pgvector embeddings are 384-dim (S-PubMedBert-MS-MARCO).
+- `clinical_observation` column stores DeepSeek emergency-pass framing (formerly meditron_observation).
 
 ## LLM Pipeline Rules
 1. BanglaBERT: MEDICAL vs CHITCHAT only — not emergency detection.
-2. Meditron-7B: outputs JSON `{ emergency_detected: boolean, primary_clinical_observation: string }`.
-3. DeepSeek-R1: triage nurse persona (no diagnoses, no drug dosages). Strip `` blocks before patient text or DB insert.
-4. BioBERT: runs ONLY after `triage_complete` — input is full conversation transcript, not single turns.
-5. Malformed LLM output → schema validation gate → auto-retry once → deterministic fallback. Never write broken data.
+2. Keyword hard gate runs synchronously BEFORE any LLM emergency call.
+3. DeepSeek emergency pass: JSON `{ emergency_detected, primary_clinical_observation }` only.
+4. DeepSeek triage: nurse persona, no diagnoses, no drug dosages. Strip `` blocks before patient text or DB insert.
+5. BioBERT: runs ONLY after `triage_complete` — full conversation transcript.
+6. Malformed LLM output → schema validation gate → auto-retry once → deterministic fallback.
 
 ## n8n Workflows
+- WhatsApp trigger: WhatsApp Business Cloud node or Webhook + HTTP reply to Graph API.
 - PII scrub (SHA-256) before any external API call.
-- Emergency branch terminates pipeline — no DeepSeek, no booking nodes.
+- Emergency branch terminates pipeline — no triage, no booking nodes.
 - Conversation state in Supabase JSON buffer, 24hr TTL.
 
 ## Security
-- No secrets in code, commits, or client-side env (`NEXT_PUBLIC_` only for anon-safe values).
-- Patient text wrapped in delimiters before LLM calls (prompt injection guard).
-- Open-weights models only in patient pipeline — no OpenAI/Anthropic for live triage.
+- No secrets in code, commits, or client-side env.
+- Patient text wrapped in delimiters before LLM calls.
+- Open-weights / Groq-hosted models only — no OpenAI/Anthropic for live triage.
 
 ## File layout
 - `apps/portal/` — Next.js doctor portal
 - `services/ml/` — BanglaBERT + BioBERT Flask endpoints
-- `services/n8n/` — Docker compose for local n8n
+- `services/pipeline/` — prompts, emergency keywords, Zod schemas
+- `services/n8n/` — Docker compose + workflow exports
 - `.env.local` at repo root — single source of truth for local dev
-
-## Style
-- Minimal diffs. Reuse existing abstractions. No over-engineering.
-- Comments only for non-obvious clinical or pipeline logic.
