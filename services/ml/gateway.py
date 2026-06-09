@@ -1,180 +1,222 @@
 """
 Unified ML Gateway — single process on :5000
-Combines BanglaBERT (chitchat filter) + entity extraction (Groq-powered).
-Designed for M1 8GB: one process, lazy loading, minimal memory.
+Loads all local PyTorch/Transformer models here to prevent Out-Of-Memory errors
+across multiple processes.
 """
 
-from __future__ import annotations
-
-import json
 import os
 import re
 from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+import torch
+from transformers import pipeline
+from sentence_transformers import SentenceTransformer, util
 
-# Load repo root .env.local
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 
 app = Flask(__name__)
 
-# ─── BanglaBERT chitchat filter (regex stub — good enough for demo) ──────────
+# Device config (MPS for Apple Silicon, else CPU)
+device = "mps" if torch.backends.mps.is_available() else "cpu"
+app.logger.info(f"Loading ML models on device: {device}")
 
-CHITCHAT_PATTERNS = re.compile(
-    r"^(hi|hello|hey|salam|assalam|kemon|ki khobor|thanks|thank you|dhonnobad|"
-    r"good morning|good night|shubho|bye|tata|ok|okay|hmm|ji|na|accha)\b",
-    re.IGNORECASE,
-)
+# ─── 1. BanglaBERT (Intent Classification) ──────────────────────────────────
+# sagorsarker/banglabert is a base MLM. We'll use it to embed text and compare
+# against semantic anchors to determine MEDICAL vs CHITCHAT intent.
 
-MEDICAL_KEYWORDS = re.compile(
-    r"(pain|ache|byatha|jor|fever|cough|kashi|blood|rokto|vomit|bomi|"
-    r"headache|matha|chest|buk|stomach|pet|breathing|shash|diarr|"
-    r"pregnant|gorbhoboti|dizzy|matha ghore|weak|durbol|swelling|"
-    r"injury|chot|burn|pora|allergy|rash|infection|diabetes|pressure|"
-    r"heart|hridoy|cancer|surgery|medicine|oushodh|doctor|hospital)",
-    re.IGNORECASE,
-)
+banglabert_model = None
+CHITCHAT_ANCHORS = None
+MEDICAL_ANCHORS = None
 
+def init_banglabert():
+    global banglabert_model, CHITCHAT_ANCHORS, MEDICAL_ANCHORS
+    if banglabert_model is None:
+        from sentence_transformers import models
+        app.logger.info("Loading BanglaBERT...")
+        # Wrap base huggingface model as sentence transformer
+        word_embedding_model = models.Transformer("sagorsarker/bangla-bert-base")
+        pooling_model = models.Pooling(word_embedding_model.get_word_embedding_dimension())
+        banglabert_model = SentenceTransformer(modules=[word_embedding_model, pooling_model], device=device)
+        
+        chitchat_texts = ["hi", "hello", "hey", "salam", "kemon achen", "ki khobor", "thanks", "tata", "bye", "ok", "ji"]
+        medical_texts = ["amar jor", "buke betha", "matha ghurche", "bomi hochche", "fever", "cough", "doctor lagbe", "hospital", "pain"]
+        
+        CHITCHAT_ANCHORS = banglabert_model.encode(chitchat_texts, convert_to_tensor=True)
+        MEDICAL_ANCHORS = banglabert_model.encode(medical_texts, convert_to_tensor=True)
+        app.logger.info("BanglaBERT loaded.")
 
 def classify_intent(text: str) -> str:
-    """MEDICAL vs CHITCHAT classification."""
-    stripped = text.strip()
-    if not stripped:
-        return "CHITCHAT"
-    # Medical keywords override
-    if MEDICAL_KEYWORDS.search(stripped):
-        return "MEDICAL"
-    # Short chitchat patterns
-    if CHITCHAT_PATTERNS.match(stripped) and len(stripped.split()) <= 5:
-        return "CHITCHAT"
-    # Default: treat as medical (safer for triage)
-    return "MEDICAL"
+    """Classify intent using BanglaBERT embeddings."""
+    if not text.strip(): return "CHITCHAT"
+    # Basic short-circuit
+    words = len(text.split())
+    if words > 10: return "MEDICAL" # Long texts are usually medical
+    
+    emb = banglabert_model.encode(text, convert_to_tensor=True)
+    chitchat_sim = util.cos_sim(emb, CHITCHAT_ANCHORS).max().item()
+    medical_sim = util.cos_sim(emb, MEDICAL_ANCHORS).max().item()
+    
+    return "CHITCHAT" if chitchat_sim > medical_sim and chitchat_sim > 0.6 else "MEDICAL"
 
 
-# ─── Entity extraction via Groq (replaces BioBERT for hackathon) ─────────────
+# ─── 2. BioBERT (NER Extraction) ─────────────────────────────────────────────
+# d4data/biomedical-ner-all is fine-tuned for biomedical NER.
 
-ENTITY_EXTRACTION_PROMPT = """You are a medical NER (Named Entity Recognition) system. Extract structured medical entities from the conversation transcript below.
+biobert_ner = None
 
-Output ONLY valid JSON matching this schema exactly:
-{
-  "symptoms": ["symptom1", "symptom2"],
-  "body_locations": ["location1", "location2"],
-  "severity_markers": ["marker1"],
-  "icd10_code": "code or null",
-  "department": "department name"
-}
+def init_biobert():
+    global biobert_ner
+    if biobert_ner is None:
+        app.logger.info("Loading BioBERT NER...")
+        biobert_ner = pipeline(
+            "ner", 
+            model="d4data/biomedical-ner-all", 
+            tokenizer="d4data/biomedical-ner-all", 
+            aggregation_strategy="simple", 
+            device=0 if device == "mps" else -1 # 0 usually works for mps in pipelines, but fallback to cpu if it errors
+        )
+        app.logger.info("BioBERT NER loaded.")
 
-Rules:
-- symptoms: exact symptom phrases from the text
-- body_locations: anatomical locations mentioned
-- severity_markers: words indicating severity (e.g., "severe", "mild", "3 days")
-- icd10_code: most likely ICD-10 code (e.g., "R50.9" for fever), or null if unsure
-- department: most appropriate medical department (Cardiology, Neurology, Gastroenterology, Pulmonology, General Medicine, Orthopedics, Dermatology, ENT, Gynecology, Pediatrics, Psychiatry, Ophthalmology)
-
-Transcript:
-\"\"\"
-{transcript}
-\"\"\"
-"""
-
-
-def extract_entities_groq(transcript: str) -> dict:
-    """Use Groq LLM to extract medical entities (faster than BioBERT for hackathon)."""
-    import urllib.error
-    import urllib.request
-
-    api_key = os.environ.get("GROQ_API_KEY", "")
-    if not api_key:
-        return _empty_entities("Groq API key not configured")
-
-    model = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
-    payload = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "You are a medical NER system. Output only valid JSON, no other text.",
-            },
-            {
-                "role": "user",
-                "content": ENTITY_EXTRACTION_PROMPT.format(transcript=transcript),
-            },
-        ],
-        "temperature": 0,
-        "max_tokens": 500,
-    }
-
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/chat/completions",
-        data=json.dumps(payload).encode(),
-        headers={
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
-    )
-
+def extract_entities_biobert(text: str) -> dict:
+    """Extract entities using BioBERT."""
+    if not text.strip(): return _empty_entities()
+    
+    # We may need to chunk if transcript is very long, but for triage < 512 is normal
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body = json.loads(resp.read().decode())
-        content = body["choices"][0]["message"]["content"].strip()
-        # Extract JSON if wrapped in markdown
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        parsed = json.loads(match.group(0) if match else content)
-        # Ensure all expected fields
+        # Pass to NER
+        results = biobert_ner(text)
+        
+        symptoms = []
+        body_locations = []
+        severity = []
+        
+        for entity in results:
+            grp = entity.get("entity_group", "")
+            word = entity.get("word", "").strip()
+            
+            if "Symptom" in grp or "Disease" in grp:
+                symptoms.append(word)
+            elif "Anatomy" in grp or "Body_Part" in grp:
+                body_locations.append(word)
+            elif "Severity" in grp or "Duration" in grp:
+                severity.append(word)
+                
+        # BioBERT doesn't do ICD-10 out of the box, we just output the extracted tokens.
+        # DeepSeek triage summary will have provided department.
         return {
-            "symptoms": parsed.get("symptoms", []),
-            "body_locations": parsed.get("body_locations", []),
-            "severity_markers": parsed.get("severity_markers", []),
-            "icd10_code": parsed.get("icd10_code"),
-            "department": parsed.get("department", "General Medicine"),
+            "symptoms": list(set(symptoms)),
+            "body_locations": list(set(body_locations)),
+            "severity_markers": list(set(severity)),
+            "icd10_code": None, # Stubbed, could map via dictionary
+            "department": "General Medicine" # Passed separately usually
         }
     except Exception as exc:
-        app.logger.warning("Entity extraction failed: %s", exc)
+        app.logger.error(f"BioBERT failed: {exc}")
         return _empty_entities(str(exc))
 
-
 def _empty_entities(reason: str = "") -> dict:
-    return {
-        "symptoms": [],
-        "body_locations": [],
-        "severity_markers": [],
-        "icd10_code": None,
-        "department": "General Medicine",
-        "_error": reason,
-    }
+    return {"symptoms": [], "body_locations": [], "severity_markers": [], "icd10_code": None, "department": "General Medicine", "_error": reason}
 
+
+# ─── 3. S-PubMedBert (Semantic Embeddings) ──────────────────────────────────
+# pritamdeka/S-PubMedBert-MS-MARCO for dense doctor matching
+
+pubmedbert_model = None
+
+def init_pubmedbert():
+    global pubmedbert_model
+    if pubmedbert_model is None:
+        app.logger.info("Loading PubMedBERT...")
+        pubmedbert_model = SentenceTransformer("pritamdeka/S-PubMedBert-MS-MARCO", device=device)
+        app.logger.info("PubMedBERT loaded.")
+
+
+# ─── 4. FastText (Language Detection) ───────────────────────────────────────
+
+fasttext_model = None
+
+def init_fasttext():
+    global fasttext_model
+    if fasttext_model is None:
+        import fasttext
+        app.logger.info("Loading FastText...")
+        model_path = str(Path(__file__).resolve().parent / "lid.176.ftz")
+        try:
+            fasttext_model = fasttext.load_model(model_path)
+            app.logger.info("FastText loaded.")
+        except Exception as exc:
+            app.logger.error(f"Failed to load fasttext: {exc}")
 
 # ─── Routes ──────────────────────────────────────────────────────────────────
 
+@app.before_request
+def load_models_lazy():
+    # Lazy loading so we don't block import, but block first request
+    init_banglabert()
+    init_biobert()
+    init_pubmedbert()
+    init_fasttext()
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "services": ["classify", "extract"]})
-
+    return jsonify({"status": "ok", "models": ["banglabert", "biobert", "pubmedbert", "fasttext"]})
 
 @app.post("/classify")
 def classify_route():
-    """BanglaBERT intent classification: MEDICAL vs CHITCHAT."""
     payload = request.get_json(silent=True) or {}
     text = payload.get("text", "")
-    if not text:
-        return jsonify({"error": "text required"}), 400
-    intent = classify_intent(text)
-    return jsonify({"intent": intent, "text_length": len(text)})
-
+    if not text: return jsonify({"error": "text required"}), 400
+    return jsonify({"intent": classify_intent(text), "text_length": len(text)})
 
 @app.post("/extract")
 def extract_route():
-    """Entity extraction from conversation transcript."""
     payload = request.get_json(silent=True) or {}
     transcript = payload.get("transcript", "")
-    if not transcript:
-        return jsonify({"error": "transcript required"}), 400
-    entities = extract_entities_groq(transcript)
-    return jsonify(entities)
+    if not transcript: return jsonify({"error": "transcript required"}), 400
+    return jsonify(extract_entities_biobert(transcript))
 
+@app.post("/embed")
+def embed_route():
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text", "")
+    if not text: return jsonify({"error": "text required"}), 400
+    emb = pubmedbert_model.encode([text])[0].tolist()
+    return jsonify({"embedding": emb})
+
+@app.post("/langid")
+def langid_route():
+    payload = request.get_json(silent=True) or {}
+    text = payload.get("text", "")
+    if not text: return jsonify({"error": "text required"}), 400
+    
+    # fastText expects single line
+    text = text.replace("\n", " ").strip()
+    if not text or fasttext_model is None: 
+        return jsonify({"lang": "en", "confidence": 1.0})
+    
+    predictions = fasttext_model.predict(text, k=1)
+    label = predictions[0][0].replace("__label__", "")
+    confidence = predictions[1][0]
+    
+    # Map to our standard
+    if label == "bn":
+        # Check for romanized vs bengali script using regex
+        if re.search(r'[\u0980-\u09FF]', text):
+            lang = "bn"
+        else:
+            lang = "banglish"
+    elif label == "en":
+        lang = "en"
+    else:
+        # Fallback heuristic
+        if re.search(r'[\u0980-\u09FF]', text):
+            lang = "bn"
+        else:
+            lang = "en"
+            
+    return jsonify({"lang": lang, "confidence": float(confidence)})
 
 if __name__ == "__main__":
     port = int(os.environ.get("ML_GATEWAY_PORT", "5000"))
