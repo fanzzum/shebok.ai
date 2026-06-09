@@ -49,28 +49,26 @@ _PROMPTS = json.loads((_ROOT / "services" / "pipeline" / "prompts.json").read_te
 TRIAGE_SYSTEM_PROMPT = """You are a caring triage nurse for shebok.ai, a Bangladeshi health assistant on WhatsApp.
 
 LANGUAGE RULES (CRITICAL):
-- If the patient writes in Banglish (Romanized Bengali like "amar matha betha"), you MUST reply in Banglish. Do NOT switch to Bengali script or English.
-- If the patient writes in Bengali script (বাংলা), reply in Bengali script.
+- If the patient writes in Banglish (Romanized Bengali like "amar matha betha") or Bengali script (বাংলা), you MUST reply in native Bengali script (বাংলা).
+- Do NOT reply in Banglish. Ever.
 - If the patient writes in English, reply in English.
-- Match the patient's EXACT language style. This is the most important rule.
+- Match the patient's language choice (Bengali or English). This is the most important rule.
 
-BANGLISH STYLE GUIDE:
-- Write like a real Bangladeshi person texting on WhatsApp
-- Use common shortenings: "apni" not "aapni", "ki" not "kee", "koto" not "kato"
+BENGALI STYLE GUIDE:
 - Keep it warm and friendly, like talking to an apa/bhai
-- Use natural filler words: "accha", "hmm", "ji"
-- NEVER use overly formal or bookish Bengali
+- Use natural filler words: "আচ্ছা", "হুম", "জি"
+- NEVER use overly formal or bookish Bengali. Use natural colloquial Bengali.
 
 EXAMPLE CONVERSATIONS (follow this tone exactly):
 
 Patient: "amar buke betha korche"
-Nurse: "Accha, buke betha ta kotodin dhore hocche? Ar betha ta ki shob shomoy thake naki majhe majhe ashe?"
+Nurse: "আচ্ছা, বুকে ব্যথাটা কতদিন ধরে হচ্ছে? আর ব্যথাটা কি সব সময় থাকে নাকি মাঝে মাঝে আসে?"
 
 Patient: "2 din dhore, majhe majhe ashe"
-Nurse: "Bujhlam. Betha ta ki bam dike beshi naki dui dike e? Ar shash nite ki kono shomossha hocche?"
+Nurse: "বুঝলাম। ব্যথাটা কি বাম দিকে বেশি নাকি দুই দিকেই? আর শ্বাস নিতে কি কোনো সমস্যা হচ্ছে?"
 
 Patient: "amar matha ghurche ar bomi bomi lagche"
-Nurse: "Apnar ki jor ache? Last e kobe khabar kheyechen?"
+Nurse: "আপনার কি জ্বর আছে? লাস্ট কবে খাবার খেয়েছেন?"
 
 YOUR JOB:
 - Ask ONE focused clinical follow-up question per turn
@@ -91,7 +89,7 @@ Do NOT output TRIAGE_COMPLETE until you have asked at least 2 follow-up question
 
 BOOKING_SYSTEM_PROMPT = """You are a friendly appointment scheduler for shebok.ai (Bangladesh health assistant).
 
-LANGUAGE: Match the patient's language exactly (Banglish/Bengali/English). If they used Banglish during triage, you MUST reply in Banglish.
+LANGUAGE: If the patient uses Banglish or Bengali, you MUST reply in Bengali script (বাংলা). NEVER reply in Banglish. If they use English, reply in English.
 
 The patient just finished triage. Present available doctors and help them book.
 
@@ -99,13 +97,13 @@ Format doctors as a simple list:
 1. Dr. Name — Specialty, Hospital — Available: [slots]
 2. Dr. Name — ...
 
-BANGLISH EXAMPLE:
-"Apnar jonno ei doctor ra available achen:
+BENGALI EXAMPLE:
+"আপনার জন্য এই ডাক্তাররা এভেইলেবল আছেন:
 
 1. Dr. Rahim — Cardiology, Square Hospital — Available: Aj 3:30pm, Kalke 10am
 2. Dr. Sultana — Cardiology, DMCH — Available: Kalke 2pm
 
-Kon doctor er kache jete chaan? Number ta bolun (1 ba 2), ar ki shomoy convenient hobe apnar?"
+কোন ডাক্তারের কাছে যেতে চান? নম্বরটি বলুন (১ বা ২), আর কোন সময়টি আপনার জন্য সুবিধাজনক হবে?"
 
 After selection, confirm with:
 BOOKING_CONFIRMED:{{"doctor_id":"uuid","doctor_name":"...","slot_time":"ISO datetime","department":"..."}}
@@ -129,7 +127,7 @@ def _detect_language(transcript: list) -> str:
     """Detect patient language from transcript using fastText via ML Gateway."""
     patient_texts = " ".join(t["content"] for t in transcript if t.get("role") == "user")
     if not patient_texts:
-        return "banglish"
+        return "bn"
     
     import urllib.request
     try:
@@ -138,10 +136,11 @@ def _detect_language(transcript: list) -> str:
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             res = json.loads(resp.read().decode())
-            return res.get("lang", "banglish")
+            detected = res.get("lang", "bn")
+            return "bn" if detected == "banglish" else detected
     except Exception as exc:
         app.logger.error("FastText Gateway failed: %s", exc)
-        return "banglish"
+        return "bn"
 
 
 # ─── Supabase helpers ────────────────────────────────────────────────────────
@@ -251,7 +250,7 @@ def save_triage_record(patient_id: str, triage_data: dict, entities: dict, clini
     return result[0]["id"] if result else None
 
 
-def get_doctors_semantically(patient_summary: str, lat: float = 23.75, lng: float = 90.39) -> list:
+def get_doctors_semantically(patient_summary: str, department: str = None, lat: float = 23.75, lng: float = 90.39) -> list:
     """Get doctors semantically matched to patient summary using S-PubMedBERT and ChromaDB."""
     import urllib.parse
     import math
@@ -269,7 +268,8 @@ def get_doctors_semantically(patient_summary: str, lat: float = 23.75, lng: floa
             emb = res["embedding"]
     except Exception as e:
         app.logger.error("Embedding failed: %s", e)
-        return _supabase_request("GET", "doctor_registry?limit=3") or []
+        fallback_query = f"doctor_registry?specialty=eq.{urllib.parse.quote(department)}&limit=3" if department else "doctor_registry?limit=3"
+        return _supabase_request("GET", fallback_query) or []
         
     # Query ChromaDB
     try:
@@ -277,14 +277,21 @@ def get_doctors_semantically(patient_summary: str, lat: float = 23.75, lng: floa
         from pathlib import Path
         chroma_path = Path(__file__).resolve().parents[2] / "services" / "chroma_db"
         if not chroma_path.exists():
-            return _supabase_request("GET", "doctor_registry?limit=3") or []
+            fallback_query = f"doctor_registry?specialty=eq.{urllib.parse.quote(department)}&limit=3" if department else "doctor_registry?limit=3"
+            return _supabase_request("GET", fallback_query) or []
             
         client = chromadb.PersistentClient(path=str(chroma_path))
         collection = client.get_collection("doctors")
-        results = collection.query(query_embeddings=[emb], n_results=10)
+        
+        query_args = {"query_embeddings": [emb], "n_results": 10}
+        if department:
+            query_args["where"] = {"specialty": department}
+            
+        results = collection.query(**query_args)
         
         if not results["ids"] or not results["ids"][0]:
-            return _supabase_request("GET", "doctor_registry?limit=3") or []
+            fallback_query = f"doctor_registry?specialty=eq.{urllib.parse.quote(department)}&limit=3" if department else "doctor_registry?limit=3"
+            return _supabase_request("GET", fallback_query) or []
             
         # Filter by distance (10km approx)
         matched_doctors = []
@@ -316,7 +323,8 @@ def get_doctors_semantically(patient_summary: str, lat: float = 23.75, lng: floa
         return doc_list
     except Exception as e:
         app.logger.error("ChromaDB query failed: %s", e)
-        return _supabase_request("GET", "doctor_registry?limit=3") or []
+        fallback_query = f"doctor_registry?specialty=eq.{urllib.parse.quote(department)}&limit=3" if department else "doctor_registry?limit=3"
+        return _supabase_request("GET", fallback_query) or []
 
 
 def save_appointment(patient_id: str, doctor_id: str, triage_record_id: str, slot_time: str) -> str | None:
@@ -602,7 +610,7 @@ def _handle_triage(session: dict, whatsapp_hash: str, user_text: str) -> dict:
         department = triage_data.get("department", entities.get("department", "General Medicine"))
         # Match using full patient chief complaint and symptoms
         patient_summary_text = triage_data.get("summary", "") + " " + " ".join(entities.get("symptoms", []))
-        doctors = get_doctors_semantically(patient_summary_text)
+        doctors = get_doctors_semantically(patient_summary_text, department=department)
 
         if doctors:
             # Detect patient's language
@@ -692,11 +700,11 @@ def _handle_booking(session: dict, whatsapp_hash: str, user_text: str) -> dict:
         update_session(session["id"], {"phase": "done"})
         no_doc_msg = {
             "banglish": "Dukkhito, kono doctor paowa jacche na ekhon.",
-            "bn": "দুঃখিত, কোনো ডাক্তার পাওয়া যাচ্ছে না এখন।",
-            "en": "Sorry, no doctors available right now.",
+            "bn": "দুঃখিত, কোনো ডাক্তার পাওয়া যাচ্ছে না।",
+            "en": "Sorry, no doctors are available right now.",
         }
         return {
-            "response_text": no_doc_msg.get(lang, no_doc_msg["banglish"]),
+            "response_text": no_doc_msg.get(lang, no_doc_msg["bn"]),
             "state": "no_doctors",
             "is_complete": True,
             "phase": "done",
@@ -755,7 +763,7 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
             "bn": "কোন ডাক্তার এবং সময় চান? নম্বর দিয়ে জানান।",
             "en": "Which doctor and time? Please specify the number.",
         }
-        selection = {"confidence": "low", "clarification_needed": clarify_msg.get(lang, clarify_msg["banglish"])}
+        selection = {"confidence": "low", "clarification_needed": clarify_msg.get(lang, clarify_msg["bn"])}
 
     if selection.get("confidence") == "low" or selection.get("clarification_needed"):
         clarify_default = {
@@ -763,7 +771,7 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
             "bn": "কোন ডাক্তার এবং সময় চান? নম্বর দিয়ে জানান।",
             "en": "Which doctor and time slot? Please specify.",
         }
-        clarification = selection.get("clarification_needed") or clarify_default.get(lang, clarify_default["banglish"])
+        clarification = selection.get("clarification_needed") or clarify_default.get(lang, clarify_default["bn"])
         return {
             "response_text": clarification,
             "state": "booking_clarify",
@@ -834,7 +842,7 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
     }
 
 
-def _format_doctor_options(doctors: list, department: str, lang: str = "banglish") -> str:
+def _format_doctor_options(doctors: list, department: str, lang: str = "bn") -> str:
     """Format doctor list for WhatsApp message in patient's language."""
     if lang == "banglish":
         lines = [f"📋 Apnar jonno {department} er doctor ra:\n"]

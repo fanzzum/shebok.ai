@@ -1,4 +1,4 @@
-"""Sync keyword emergency hard gate + Groq LLM emergency pass (replaces Meditron)."""
+"""LLM-only emergency gate based on Emergency Severity Index (ESI) scoring."""
 
 from __future__ import annotations
 
@@ -9,33 +9,27 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, request
+import urllib.error
+import urllib.request
 
 # Load repo root .env.local when running standalone
 load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 
 app = Flask(__name__)
 
-_DIR = Path(__file__).parent
-_KEYWORDS = json.loads((_DIR / "emergency_keywords.json").read_text(encoding="utf-8"))
-_PROMPTS = json.loads((_DIR / "prompts.json").read_text(encoding="utf-8"))
+ESI_PROMPT = """You are an AI triage nurse running the Emergency Severity Index (ESI) protocol. 
+Analyze the patient's message and assign a strict Emergency Score from 1 to 5 based on these definitive conditions:
 
-_ALL_KEYWORDS: list[str] = []
-for group in _KEYWORDS.values():
-    _ALL_KEYWORDS.extend(k.lower() for k in group)
+- Score 5 (Critical): Immediate threat to life. Unconscious, active heart attack/stroke signs, severe choking, massive bleeding, anaphylaxis.
+- Score 4 (Emergent): High-risk situation, severe acute pain, but conscious and breathing.
+- Score 3 (Urgent): Stable but requires clinical intervention (high fever, severe vomiting, deep laceration).
+- Score 2 (Less Urgent): Minor acute conditions (mild sprain, low fever, minor cuts).
+- Score 1 (Non-Urgent): Chronic or routine issues (mild rash, common cold, standard checkup query).
 
+You must respond with a raw JSON object and nothing else. Do not include markdown formatting or explanations.
+Format: {"emergency_score": <int>, "reason": "<brief_clinical_justification>"}"""
 
-def keyword_emergency_detected(text: str) -> tuple[bool, str | None]:
-    normalized = text.lower()
-    for kw in _ALL_KEYWORDS:
-        if kw in normalized:
-            return True, kw
-    return False, None
-
-
-def groq_emergency_pass(text: str) -> dict:
-    import urllib.error
-    import urllib.request
-
+def check_emergency_llm(text: str) -> dict:
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         return {
@@ -44,20 +38,18 @@ def groq_emergency_pass(text: str) -> dict:
             "source": "error",
         }
 
-    model = os.environ.get(
-        "GROQ_LLM_MODEL",
-        _PROMPTS["emergency_detector"]["default_model"],
-    )
-    system = _PROMPTS["emergency_detector"]["system"]
+    model = os.environ.get("GROQ_LLM_MODEL", "llama-3.3-70b-versatile")
+    
     payload = {
         "model": model,
         "messages": [
-            {"role": "system", "content": system},
+            {"role": "system", "content": ESI_PROMPT},
             {"role": "user", "content": f'"""{text}"""'},
         ],
         "temperature": 0,
         "max_tokens": 200,
     }
+    
     req = urllib.request.Request(
         "https://api.groq.com/openai/v1/chat/completions",
         data=json.dumps(payload).encode(),
@@ -67,15 +59,25 @@ def groq_emergency_pass(text: str) -> dict:
         },
         method="POST",
     )
+    
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             body = json.loads(resp.read().decode())
         content = body["choices"][0]["message"]["content"].strip()
+        
         # Extract JSON if model wraps in markdown
         match = re.search(r"\{.*\}", content, re.DOTALL)
         parsed = json.loads(match.group(0) if match else content)
-        parsed["source"] = "groq"
-        return parsed
+        
+        score = parsed.get("emergency_score", 1)
+        is_emergency = score >= 4
+        
+        return {
+            "emergency_detected": is_emergency,
+            "primary_clinical_observation": parsed.get("reason", "No reason provided"),
+            "emergency_score": score,
+            "source": "groq_esi"
+        }
     except (urllib.error.URLError, KeyError, json.JSONDecodeError) as exc:
         return {
             "emergency_detected": False,
@@ -86,7 +88,7 @@ def groq_emergency_pass(text: str) -> dict:
 
 @app.get("/health")
 def health():
-    return jsonify({"status": "ok", "keywords": len(_ALL_KEYWORDS)})
+    return jsonify({"status": "ok", "mode": "LLM_ESI_ONLY"})
 
 
 @app.post("/check")
@@ -96,18 +98,7 @@ def check():
     if not text:
         return jsonify({"error": "text required"}), 400
 
-    kw_hit, matched = keyword_emergency_detected(text)
-    if kw_hit:
-        return jsonify(
-            {
-                "emergency_detected": True,
-                "primary_clinical_observation": f"Keyword hard gate: matched '{matched}'",
-                "source": "keyword_gate",
-                "matched_keyword": matched,
-            }
-        )
-
-    llm_result = groq_emergency_pass(text)
+    llm_result = check_emergency_llm(text)
     return jsonify(llm_result)
 
 
