@@ -44,7 +44,7 @@ MAX_TRIAGE_TURNS = 5
 
 # ─── Prompts ─────────────────────────────────────────────────────────────────
 
-_PROMPTS = json.loads((_ROOT / "services" / "pipeline" / "prompts.json").read_text())
+_PROMPTS = json.loads((_ROOT / "services" / "pipeline" / "prompts.json").read_text(encoding="utf-8"))
 
 TRIAGE_SYSTEM_PROMPT = """You are a caring triage nurse for shebok.ai, a Bangladeshi health assistant on WhatsApp.
 
@@ -133,7 +133,7 @@ def _detect_language(transcript: list) -> str:
     
     import urllib.request
     try:
-        url = f"{GATEWAY_URL}/langid"
+        url = f"{ML_GATEWAY_URL}/langid"
         data = json.dumps({"text": patient_texts}).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
@@ -918,8 +918,8 @@ def reset_session():
 if __name__ == "__main__":
     port = int(os.environ.get("TRIAGE_SERVICE_PORT", "5004"))
     print(f"Triage orchestrator starting on :{port}")
-    print(f"  Groq: {'✅' if GROQ_API_KEY else '❌'}")
-    print(f"  Supabase: {'✅' if SUPABASE_URL else '❌'}")
+    print(f"  Groq: {'[OK]' if GROQ_API_KEY else '[MISSING]'}")
+    print(f"  Supabase: {'[OK]' if SUPABASE_URL else '[MISSING]'}")
     print(f"  ML Gateway: {ML_GATEWAY_URL}")
     print(f"  Emergency Gate: {EMERGENCY_GATE_URL}")
     app.run(host="0.0.0.0", port=port, debug=False)

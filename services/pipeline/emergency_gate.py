@@ -16,8 +16,8 @@ load_dotenv(Path(__file__).resolve().parents[2] / ".env.local")
 app = Flask(__name__)
 
 _DIR = Path(__file__).parent
-_KEYWORDS = json.loads((_DIR / "emergency_keywords.json").read_text())
-_PROMPTS = json.loads((_DIR / "prompts.json").read_text())
+_KEYWORDS = json.loads((_DIR / "emergency_keywords.json").read_text(encoding="utf-8"))
+_PROMPTS = json.loads((_DIR / "prompts.json").read_text(encoding="utf-8"))
 
 _ALL_KEYWORDS: list[str] = []
 for group in _KEYWORDS.values():
