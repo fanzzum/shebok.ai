@@ -9,6 +9,8 @@ export interface Patient {
   nid_hash: string | null;
   name: string | null;
   dob: string | null;
+  gender: string | null;
+  age: number | null;
   created_at: string;
   family_members: unknown[];
   consent_given_at: string | null;
@@ -60,6 +62,21 @@ export interface Appointment {
   patient?: Patient;
   doctor?: Doctor;
   triage_record?: TriageRecord;
+}
+
+export interface Prescription {
+  id: string;
+  patient_id: string;
+  doctor_id: string | null;
+  triage_record_id: string | null;
+  past_illness: string;
+  disease: string;
+  investigation: string;
+  referred_opd: string;
+  medicines: string;
+  created_at: string;
+  // Joined
+  doctor?: Doctor;
 }
 
 // Dashboard stats

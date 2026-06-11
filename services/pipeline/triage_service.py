@@ -49,10 +49,10 @@ _PROMPTS = json.loads((_ROOT / "services" / "pipeline" / "prompts.json").read_te
 TRIAGE_SYSTEM_PROMPT = """You are a caring triage nurse for shebok.ai, a Bangladeshi health assistant on WhatsApp.
 
 LANGUAGE RULES (CRITICAL):
-- If the patient writes in Banglish (Romanized Bengali like "amar matha betha") or Bengali script (বাংলা), you MUST reply in native Bengali script (বাংলা).
+- If the patient writes in English, YOU MUST REPLY IN ENGLISH.
+- If the patient writes in Banglish (Romanized Bengali like "amar matha betha") or Bengali script (বাংলা), YOU MUST REPLY IN NATIVE BENGALI SCRIPT (বাংলা).
 - Do NOT reply in Banglish. Ever.
-- If the patient writes in English, reply in English.
-- Match the patient's language choice (Bengali or English). This is the most important rule.
+- Pay close attention to the patient's language choice (Bengali or English) and strictly match it. This is the most important rule.
 
 BENGALI STYLE GUIDE:
 - Keep it warm and friendly, like talking to an apa/bhai
@@ -125,14 +125,17 @@ EMERGENCY_RESPONSE = _PROMPTS.get(
 
 def _detect_language(transcript: list) -> str:
     """Detect patient language from transcript using fastText via ML Gateway."""
-    patient_texts = " ".join(t["content"] for t in transcript if t.get("role") == "user")
-    if not patient_texts:
+    patient_messages = [t["content"] for t in transcript if t.get("role") == "user"]
+    if not patient_messages:
         return "bn"
+    
+    # Only use the last message for language detection to adapt if user switches language
+    patient_text = patient_messages[-1]
     
     import urllib.request
     try:
         url = f"{ML_GATEWAY_URL}/langid"
-        data = json.dumps({"text": patient_texts}).encode()
+        data = json.dumps({"text": patient_text}).encode()
         req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
         with urllib.request.urlopen(req, timeout=3) as resp:
             res = json.loads(resp.read().decode())
@@ -636,17 +639,14 @@ def _handle_triage(session: dict, whatsapp_hash: str, user_text: str) -> dict:
             # Detect patient's language
             lang = _detect_language(transcript)
 
-            # Clean response: remove TRIAGE_COMPLETE from patient-facing text
-            clean_response = re.sub(r"TRIAGE_COMPLETE:\s*\{.*\}", "", response).strip()
-            if clean_response:
-                full_response = f"{clean_response}\n\n{doctor_msg}"
+            # Clean response: Do not use the LLM's conversational text here to avoid mixing follow-up questions
+            # with the doctor selection prompt.
+            if lang == "banglish":
+                full_response = f"Apnar triage complete hoyeche. {department} department e pathano hochche.\n\n{doctor_msg}"
+            elif lang == "bn":
+                full_response = f"আপনার ট্রায়াজ সম্পন্ন হয়েছে। {department} বিভাগে পাঠানো হচ্ছে।\n\n{doctor_msg}"
             else:
-                if lang == "banglish":
-                    full_response = f"Apnar triage complete hoyeche. {department} department e pathano hochche.\n\n{doctor_msg}"
-                elif lang == "bn":
-                    full_response = f"আপনার ট্রায়াজ সম্পন্ন হয়েছে। {department} বিভাগে পাঠানো হচ্ছে।\n\n{doctor_msg}"
-                else:
-                    full_response = f"Your triage is complete. Routing to {department}.\n\n{doctor_msg}"
+                full_response = f"Your triage is complete. Routing to {department}.\n\n{doctor_msg}"
 
             return {
                 "response_text": full_response,
@@ -743,6 +743,8 @@ Output ONLY valid JSON:
 {{"doctor_index": 0, "slot_time": "tomorrow 10:00 AM", "confidence": "high", "clarification_needed": null}}
 
 doctor_index is 0-based ("1" means index 0, "2" means index 1).
+
+CRITICAL RULE: If the patient's reply is describing symptoms (like "payer majhkhane", "pain", etc) or is otherwise NOT picking a doctor or a time, you MUST set confidence to "low". DO NOT guess a doctor index.
 If truly unclear, set confidence to "low" and provide clarification_needed IN BANGLISH like "Kon doctor ar ki shomoy chaan? Number ta bolun."
 """
 
@@ -802,103 +804,210 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
     doctor_options_raw = session.get("doctor_options")
     doctor_options_dict = json.loads(doctor_options_raw) if isinstance(doctor_options_raw, str) else (doctor_options_raw or {})
     
-    update_session(session["id"], {
-        "phase": "verification",
-        "doctor_options": json.dumps({
-            "doctors": doctors,
-            "triage_record_id": triage_record_id,
-            "patient_id": patient_id,
-            "department": doctor_options_dict.get("department"),
-            "pending_booking": {
-                "doctor_id": selected_doctor["id"],
-                "doctor_name": selected_doctor["name"],
-                "specialty": selected_doctor["specialty"],
-                "slot_iso": slot_iso,
-                "slot_time_str": slot_time_str
-            }
-        })
-    })
-
-    if lang == "banglish":
-        ask_nid = "Apnar appointment pray confirm! Tobe fake booking theke bachte apnar NID (National ID) ba Birth Certificate number ta bolun."
-    elif lang == "bn":
-        ask_nid = "আপনার অ্যাপয়েন্টমেন্ট প্রায় নিশ্চিত! তবে ফেইক বুকিং এড়াতে আপনার এনআইডি (NID) বা জন্ম নিবন্ধন নম্বরটি দিন।"
-    else:
-        ask_nid = "Your appointment is almost confirmed! To prevent spam, please provide your NID (National ID) or Birth Certificate number."
-
-    return {
-        "response_text": ask_nid,
-        "state": "verification_required",
-        "is_complete": False,
-        "phase": "verification",
+    new_options = {
+        "doctors": doctors,
+        "triage_record_id": triage_record_id,
+        "patient_id": patient_id,
+        "department": doctor_options_dict.get("department"),
+        "pending_booking": {
+            "doctor_id": selected_doctor["id"],
+            "doctor_name": selected_doctor["name"],
+            "specialty": selected_doctor["specialty"],
+            "slot_iso": slot_iso,
+            "slot_time_str": slot_time_str
+        }
     }
 
+    update_session(session["id"], {
+        "phase": "verification",
+        "doctor_options": json.dumps(new_options)
+    })
+
+    # Call handle_verification with empty text to trigger initial demographic/NID query
+    session["phase"] = "verification"
+    session["doctor_options"] = json.dumps(new_options)
+    return _handle_verification(session, whatsapp_hash, "")
+
+
 def _handle_verification(session: dict, whatsapp_hash: str, user_text: str) -> dict:
-    """Handle NID/Birth Certificate verification phase."""
+    """Handle demographic collection and NID verification phase."""
     doctor_options = json.loads(session.get("doctor_options", "{}"))
     pending = doctor_options.get("pending_booking")
     patient_id = doctor_options.get("patient_id")
     triage_record_id = doctor_options.get("triage_record_id")
+    current_asking_field = doctor_options.get("current_asking_field")
 
     transcript = json.loads(session.get("raw_transcript", "[]")) if isinstance(session.get("raw_transcript"), str) else (session.get("raw_transcript") or [])
     lang = _detect_language(transcript)
 
     if not pending:
-        # Fallback if something went wrong
         update_session(session["id"], {"phase": "done"})
         return {"response_text": "System error.", "state": "error", "is_complete": True, "phase": "done"}
 
-    # Extract NID using LLM
-    extract_prompt = f"""Extract the NID (National ID) or Birth Certificate number from the user's message.
-User's message: "{user_text}"
+    # Fetch current patient record to check what is missing
+    patient_data = _supabase_request("GET", f"patients?id=eq.{patient_id}")
+    patient = patient_data[0] if patient_data else {}
 
-Rules:
-- The number is usually 10, 13, or 17 digits. 
-- Ignore text like "my nid is" or "amar nid hocche".
-- If no valid number is found (e.g. they say "I don't have it" or write random text), set "number" to null.
+    # 1. Process previous answer if we were asking something and user sent text
+    if user_text and current_asking_field:
+        success = False
+        update_val = None
 
-Output ONLY valid JSON:
-{{"number": "1234567890", "found": true}}
-OR
-{{"number": null, "found": false}}
-"""
+        if current_asking_field == "name":
+            try:
+                name_prompt = f"Extract the person's name from the user's message: \"{user_text}\". Output ONLY the clean name in Latin/English characters (transliterated if in Bengali script). Do not explain or add markdown/formatting. If the message itself is just a name, return that name."
+                extracted_name = groq_chat([
+                    {"role": "system", "content": "You extract names. Output only the name text, no punctuation or extra words."},
+                    {"role": "user", "content": name_prompt}
+                ], temperature=0, max_tokens=50)
+                extracted_name = re.sub(r"<think>.*?</think>", "", extracted_name, flags=re.DOTALL).strip()
+                if extracted_name and len(extracted_name) > 1 and "not found" not in extracted_name.lower():
+                    update_val = extracted_name
+                    success = True
+            except Exception:
+                pass
 
-    try:
-        response = groq_chat([
-            {"role": "system", "content": "You extract ID numbers. Output ONLY JSON."},
-            {"role": "user", "content": extract_prompt}
-        ], temperature=0, max_tokens=100)
-        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
-        match = re.search(r"\{.*\}", response, re.DOTALL)
-        result = json.loads(match.group(0) if match else response)
-    except Exception:
-        result = {"found": False}
+        elif current_asking_field == "age":
+            try:
+                age_prompt = f"Extract the age (as an integer number of years) from the user's message: \"{user_text}\". Output ONLY JSON like {{\"age\": 30, \"found\": true}} or {{\"age\": null, \"found\": false}}."
+                resp = groq_chat([
+                    {"role": "system", "content": "You extract age. Output ONLY valid JSON."},
+                    {"role": "user", "content": age_prompt}
+                ], temperature=0, max_tokens=100)
+                resp = re.sub(r"<think>.*?</think>", "", resp, flags=re.DOTALL).strip()
+                match = re.search(r"\{.*\}", resp, re.DOTALL)
+                res = json.loads(match.group(0) if match else resp)
+                if res.get("found") and res.get("age") is not None:
+                    update_val = int(res.get("age"))
+                    success = True
+            except Exception:
+                pass
 
-    if not result.get("found") or not result.get("number"):
-        if lang == "banglish":
-            clarify = "Eti sothik NID ba Birth Certificate number mone hoche na. Doya kore sothik number ti din ta na hole booking hobe na."
-        elif lang == "bn":
-            clarify = "এটি সঠিক এনআইডি বা জন্ম নিবন্ধন নম্বর বলে মনে হচ্ছে না। অনুগ্রহ করে সঠিক নম্বরটি দিন, অন্যথায় বুকিং হবে না।"
+        elif current_asking_field == "gender":
+            try:
+                gender_prompt = f"Extract the gender (strictly one of: \"Male\", \"Female\", \"Other\") from the user's message: \"{user_text}\". Identify gender terms in English, Bengali script, or Banglish (e.g. male, female, chele, meye, purush, mohila). Output ONLY JSON like {{\"gender\": \"Male\" | \"Female\" | \"Other\", \"found\": true}} or {{\"gender\": null, \"found\": false}}."
+                resp = groq_chat([
+                    {"role": "system", "content": "You extract gender. Output ONLY valid JSON."},
+                    {"role": "user", "content": gender_prompt}
+                ], temperature=0, max_tokens=100)
+                resp = re.sub(r"<think>.*?</think>", "", resp, flags=re.DOTALL).strip()
+                match = re.search(r"\{.*\}", resp, re.DOTALL)
+                res = json.loads(match.group(0) if match else resp)
+                if res.get("found") and res.get("gender"):
+                    update_val = res.get("gender")
+                    success = True
+            except Exception:
+                pass
+
+        elif current_asking_field == "nid":
+            try:
+                nid_prompt = f"Extract the NID (National ID) or Birth Certificate number from the user's message. Extract ANY sequence of numbers the user provides. Output ONLY JSON like {{\"number\": \"123...\", \"found\": true}} or {{\"number\": null, \"found\": false}}."
+                resp = groq_chat([
+                    {"role": "system", "content": "You extract NID/ID numbers. Output ONLY JSON."},
+                    {"role": "user", "content": nid_prompt}
+                ], temperature=0, max_tokens=100)
+                resp = re.sub(r"<think>.*?</think>", "", resp, flags=re.DOTALL).strip()
+                match = re.search(r"\{.*\}", resp, re.DOTALL)
+                res = json.loads(match.group(0) if match else resp)
+                if res.get("found") and res.get("number"):
+                    update_val = str(res.get("number"))
+                    success = True
+            except Exception:
+                pass
+
+        if success and update_val is not None:
+            # Update database
+            db_field = {
+                "name": "name",
+                "age": "age",
+                "gender": "gender",
+                "nid": "nid_hash"
+            }[current_asking_field]
+            _supabase_request("PATCH", f"patients?id=eq.{patient_id}", {db_field: update_val})
+            patient[db_field] = update_val # update local representation
         else:
-            clarify = "That does not look like a valid NID or Birth Certificate number. Please provide a valid number to complete your booking."
-        
+            # If parsing failed, ask again
+            if current_asking_field == "name":
+                clarify = {
+                    "bn": "আমি আপনার নামটি বুঝতে পারিনি। দয়া করে শুধু আপনার পুরো নামটি লিখে দিন।",
+                    "banglish": "Ami apnar naamti bujhte parini. Doya kore shudhu apnar puro naamti likhe din.",
+                    "en": "I could not extract your name. Please type your full name."
+                }[lang if lang in ["bn", "banglish"] else "en"]
+            elif current_asking_field == "age":
+                clarify = {
+                    "bn": "অনুগ্রহ করে আপনার বয়স কত বছর তা সংখ্যায় লিখুন (যেমন: ৩০)।",
+                    "banglish": "Doya kore apnar boyos koto bochor ta shonkhay likhun (jemon: 30).",
+                    "en": "Please enter your age in years as a number (e.g. 30)."
+                }[lang if lang in ["bn", "banglish"] else "en"]
+            elif current_asking_field == "gender":
+                clarify = {
+                    "bn": "অনুগ্রহ করে আপনার লিঙ্গ বলুন: পুরুষ (Male) নাকি নারী (Female)?",
+                    "banglish": "Doya kore apnar gender likhun: Male naki Female?",
+                    "en": "Please specify your gender: Male or Female."
+                }[lang if lang in ["bn", "banglish"] else "en"]
+            else: # NID
+                clarify = {
+                    "bn": "এটি সঠিক এনআইডি বা জন্ম নিবন্ধন নম্বর বলে মনে হচ্ছে না। অনুগ্রহ করে সঠিক নম্বরটি টাইপ করুন (যেমন: NID 123...)।",
+                    "banglish": "Eti sothik NID ba Birth Certificate number mone hoche na. Doya kore sothik number ti din (jemon: NID 123...).",
+                    "en": "That does not look like a valid NID or Birth Certificate number. Please provide a valid number."
+                }[lang if lang in ["bn", "banglish"] else "en"]
+
+            return {
+                "response_text": clarify,
+                "state": f"verification_{current_asking_field}_failed",
+                "is_complete": False,
+                "phase": "verification"
+            }
+
+    # 2. Find next missing field and prompt for it
+    missing_field = None
+    prompt_text = None
+
+    if not patient.get("name"):
+        missing_field = "name"
+        prompt_text = {
+            "bn": "আপনার অ্যাপয়েন্টমেন্ট নিশ্চিত করতে অনুগ্রহ করে আপনার পুরো নামটি লিখুন।",
+            "banglish": "Apnar appointment confirm korte doya kore apnar puro naamti likhun.",
+            "en": "To complete your appointment, please enter your full name."
+        }[lang if lang in ["bn", "banglish"] else "en"]
+    elif patient.get("age") is None:
+        missing_field = "age"
+        prompt_text = {
+            "bn": "আপনার বয়স কত বছর? অনুগ্রহ করে সংখ্যায় লিখুন (যেমন: ৩০)।",
+            "banglish": "Apnar boyos koto bochor? Doya kore shonkhay likhun (jemon: 30).",
+            "en": "What is your age in years? Please reply with a number."
+        }[lang if lang in ["bn", "banglish"] else "en"]
+    elif not patient.get("gender"):
+        missing_field = "gender"
+        prompt_text = {
+            "bn": "আপনার লিঙ্গ কি? অনুগ্রহ করে বলুন (পুরুষ/নারী)।",
+            "banglish": "Apnar gender ki? Doya kore bolun (Male/Female).",
+            "en": "What is your gender? Please specify (Male/Female)."
+        }[lang if lang in ["bn", "banglish"] else "en"]
+    elif not patient.get("nid_hash"):
+        missing_field = "nid"
+        prompt_text = {
+            "bn": "ফেইক বুকিং এড়াতে অনুগ্রহ করে আপনার এনআইডি (NID) বা জন্ম নিবন্ধন নম্বরটি দিন।",
+            "banglish": "Fake booking erate doya kore apnar NID ba Birth Certificate number ta din.",
+            "en": "To prevent fake bookings, please provide your NID or Birth Certificate number."
+        }[lang if lang in ["bn", "banglish"] else "en"]
+
+    if missing_field:
+        # Save current asking field to session
+        doctor_options["current_asking_field"] = missing_field
+        update_session(session["id"], {
+            "doctor_options": json.dumps(doctor_options)
+        })
         return {
-            "response_text": clarify,
-            "state": "verification_failed",
+            "response_text": prompt_text,
+            "state": f"verification_asking_{missing_field}",
             "is_complete": False,
             "phase": "verification"
         }
 
-    # Verification successful!
-    nid_number = str(result.get("number"))
-    
-    # 1. Update patient with NID hash (or raw for now)
-    if patient_id:
-        _supabase_request("PATCH", f"patients?id=eq.{patient_id}", {"nid_hash": nid_number})
-        
-        # 2. Save appointment
-        appt_id = save_appointment(patient_id, pending["doctor_id"], triage_record_id, pending["slot_iso"])
-        _supabase_request("PATCH", f"triage_records?id=eq.{triage_record_id}", {"status": "booked"})
+    # 3. Everything is filled! Save the appointment
+    appt_id = save_appointment(patient_id, pending["doctor_id"], triage_record_id, pending["slot_iso"])
+    _supabase_request("PATCH", f"triage_records?id=eq.{triage_record_id}", {"status": "booked"})
 
     # Mark session done
     update_session(session["id"], {"phase": "done"})
@@ -911,7 +1020,7 @@ OR
             f"🏥 Department: {pending['specialty']}\n"
             f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Apnar medical summary doctor er kache pathano hoyeche.\n"
-            f"Shustho thakun! 🙏"
+            f"Shustho thakun!"
         )
     elif lang == "bn":
         confirmation = (
@@ -920,7 +1029,7 @@ OR
             f"🏥 বিভাগ: {pending['specialty']}\n"
             f"🕐 সময়: {pending['slot_time_str']}\n\n"
             f"আপনার মেডিকেল সামারি ডাক্তারের কাছে পাঠানো হয়েছে।\n"
-            f"সুস্থ থাকুন! 🙏"
+            f"সুস্থ থাকুন!"
         )
     else:
         confirmation = (
@@ -929,7 +1038,7 @@ OR
             f"🏥 Department: {pending['specialty']}\n"
             f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Your medical summary has been sent to the doctor.\n"
-            f"Stay healthy! 🙏"
+            f"Stay healthy!"
         )
 
     return {

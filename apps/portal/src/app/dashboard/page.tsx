@@ -2,13 +2,14 @@
 
 import { useEffect, useState, useCallback } from "react";
 import { createClient } from "@/lib/supabase/client";
-import type { TriageRecord, Appointment, Patient, Doctor } from "@/lib/types";
+import type { TriageRecord, Appointment, Patient, Doctor, Prescription } from "@/lib/types";
 import { URGENCY_LABELS, URGENCY_COLORS, DEPARTMENT_COLORS } from "@/lib/types";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
+import { VoicePrescriptionModal } from "@/components/VoicePrescriptionModal";
 
 interface TriageWithPatient extends TriageRecord {
   patients: Patient | null;
@@ -27,6 +28,20 @@ export default function DashboardPage() {
   const [appointments, setAppointments] = useState<AppointmentWithRefs[]>([]);
   const [selectedRecord, setSelectedRecord] = useState<TriageWithPatient | null>(null);
   const [loading, setLoading] = useState(true);
+  const [isPrescriptionModalOpen, setIsPrescriptionModalOpen] = useState(false);
+  const [historicalPrescriptions, setHistoricalPrescriptions] = useState<Prescription[]>([]);
+
+  useEffect(() => {
+    if (selectedRecord?.patient_id) {
+      supabase.from("prescriptions")
+        .select("*, doctor:doctor_registry(*)")
+        .eq("patient_id", selectedRecord.patient_id)
+        .order("created_at", { ascending: false })
+        .then(({ data }) => setHistoricalPrescriptions(data || []));
+    } else {
+      setHistoricalPrescriptions([]);
+    }
+  }, [selectedRecord?.patient_id, supabase]);
 
   const fetchProfileAndData = useCallback(async () => {
     setLoading(true);
@@ -172,7 +187,14 @@ export default function DashboardPage() {
                 </div>
               ) : (
                 appointments.map((appt) => (
-                  <Card key={appt.id} className="border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-colors cursor-pointer">
+                  <Card key={appt.id} onClick={() => {
+                          if (appt.triage_records) {
+                            setSelectedRecord({
+                              ...appt.triage_records,
+                              patients: appt.patients
+                            });
+                          }
+                        }} className="border-white/5 bg-white/[0.02] hover:bg-white/[0.04] transition-colors cursor-pointer relative group">
                     <CardContent className="p-5">
                       <div className="flex items-center justify-between mb-3">
                         <div className="flex items-center gap-3">
@@ -194,6 +216,36 @@ export default function DashboardPage() {
                           {appt.triage_records.chief_complaint}
                         </div>
                       )}
+                      
+                      <div className="flex justify-end mt-3">
+                        <Button size="sm" onClick={(e) => {
+                          e.stopPropagation();
+                          const recordToUse = appt.triage_records || {
+                            id: "",
+                            patient_id: appt.patient_id,
+                            created_at: new Date().toISOString(),
+                            chief_complaint: "",
+                            symptoms: [],
+                            body_locations: [],
+                            severity_markers: [],
+                            icd10_code: null,
+                            deepseek_summary: "No triage summary available (direct appointment)",
+                            urgency_score: null,
+                            department: null,
+                            clinical_observation: null,
+                            doctor_feedback: null,
+                            status: "booked",
+                            is_emergency: false,
+                          };
+                          setSelectedRecord({
+                            ...recordToUse,
+                            patients: appt.patients
+                          } as TriageWithPatient);
+                          setIsPrescriptionModalOpen(true);
+                        }} className="bg-emerald-500/20 hover:bg-emerald-500 text-emerald-400 hover:text-white border border-emerald-500/20 transition-all">
+                          🎤 Write Prescription
+                        </Button>
+                      </div>
                     </CardContent>
                   </Card>
                 ))
@@ -245,9 +297,14 @@ export default function DashboardPage() {
               <div className="h-full">
                 {selectedRecord ? (
                   <div className="rounded-xl border border-white/10 bg-white/[0.02] overflow-hidden sticky top-24">
-                    <div className="bg-gradient-to-r from-emerald-500/10 to-cyan-500/10 p-4 border-b border-white/10">
-                      <h3 className="font-bold text-white mb-1">Patient Details</h3>
-                      <p className="text-xs text-zinc-400">{selectedRecord.patients?.name}</p>
+                    <div className="bg-gradient-to-r from-emerald-500/10 to-cyan-500/10 p-4 border-b border-white/10 flex justify-between items-center">
+                      <div>
+                        <h3 className="font-bold text-white mb-1">Patient Details</h3>
+                        <p className="text-xs text-zinc-400">{selectedRecord.patients?.name}</p>
+                      </div>
+                      <Button size="sm" onClick={() => setIsPrescriptionModalOpen(true)} className="bg-emerald-500 hover:bg-emerald-600 text-white shadow-lg">
+                        🎤 Write Prescription
+                      </Button>
                     </div>
                     
                     <div className="p-4 space-y-4">
@@ -294,6 +351,26 @@ export default function DashboardPage() {
                           ))}
                         </div>
                       </div>
+                      <div className="pt-4 border-t border-white/5">
+                        <p className="text-[10px] uppercase tracking-wider text-zinc-500 mb-2">Historical Prescriptions & Investigations</p>
+                        {historicalPrescriptions.length === 0 ? (
+                          <p className="text-xs text-zinc-500">No past records found for this patient.</p>
+                        ) : (
+                          <div className="space-y-3 max-h-48 overflow-y-auto pr-2 scrollbar-thin">
+                            {historicalPrescriptions.map((rx) => (
+                              <div key={rx.id} className="p-3 bg-black/20 rounded-lg border border-white/5 space-y-2">
+                                <div className="flex justify-between items-start">
+                                  <p className="text-xs font-semibold text-emerald-400">Dr. {rx.doctor?.name} ({rx.doctor?.specialty})</p>
+                                  <p className="text-[10px] text-zinc-500">{new Date(rx.created_at).toLocaleDateString()}</p>
+                                </div>
+                                {rx.disease && <p className="text-xs text-zinc-300"><span className="text-zinc-500">Diagnosis:</span> {rx.disease}</p>}
+                                {rx.investigation && <p className="text-xs text-zinc-300"><span className="text-zinc-500">Inv:</span> {rx.investigation}</p>}
+                                {rx.medicines && <p className="text-xs text-zinc-300"><span className="text-zinc-500">Rx:</span> {rx.medicines}</p>}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ) : (
@@ -307,6 +384,24 @@ export default function DashboardPage() {
 
         </div>
       </main>
+
+      {selectedRecord && doctor && (
+        <VoicePrescriptionModal
+          isOpen={isPrescriptionModalOpen}
+          onClose={() => setIsPrescriptionModalOpen(false)}
+          record={selectedRecord}
+          doctor={doctor}
+          onSaved={() => {
+            // Re-fetch historical records
+            supabase.from("prescriptions")
+              .select("*, doctor:doctor_registry(*)")
+              .eq("patient_id", selectedRecord.patient_id)
+              .order("created_at", { ascending: false })
+              .then(({ data }) => setHistoricalPrescriptions(data || []));
+            setIsPrescriptionModalOpen(false);
+          }}
+        />
+      )}
     </div>
   );
 }

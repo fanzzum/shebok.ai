@@ -3,14 +3,18 @@
 -- Uses a dummy patient; for demo visualization only
 
 -- Create a demo patient
-INSERT INTO patients (id, whatsapp_hash, name, consent_given_at)
+INSERT INTO patients (id, whatsapp_hash, name, gender, age, nid_hash, consent_given_at)
 VALUES
-  ('00000000-0000-0000-0000-000000000001', 'demo_hash_001', 'রহিম উদ্দিন', now()),
-  ('00000000-0000-0000-0000-000000000002', 'demo_hash_002', 'করিম আহমেদ', now()),
-  ('00000000-0000-0000-0000-000000000003', 'demo_hash_003', 'ফাতিমা বেগম', now()),
-  ('00000000-0000-0000-0000-000000000004', 'demo_hash_004', 'আয়েশা খাতুন', now()),
-  ('00000000-0000-0000-0000-000000000005', 'demo_hash_005', 'মোহাম্মদ আলী', now())
-ON CONFLICT DO NOTHING;
+  ('00000000-0000-0000-0000-000000000001', 'demo_hash_001', 'Rahim Uddin', 'Male', 45, '19812618901234567', now()),
+  ('00000000-0000-0000-0000-000000000002', 'demo_hash_002', 'Karim Ahmed', 'Male', 32, '19942618901234568', now()),
+  ('00000000-0000-0000-0000-000000000003', 'demo_hash_003', 'Fatima Begum', 'Female', 29, '19972618901234569', now()),
+  ('00000000-0000-0000-0000-000000000004', 'demo_hash_004', 'Ayesha Khatun', 'Female', 58, '19682618901234570', now()),
+  ('00000000-0000-0000-0000-000000000005', 'demo_hash_005', 'Mohammad Ali', 'Male', 67, '19592618901234571', now())
+ON CONFLICT (id) DO UPDATE SET
+  name = EXCLUDED.name,
+  gender = EXCLUDED.gender,
+  age = EXCLUDED.age,
+  nid_hash = EXCLUDED.nid_hash;
 
 -- Triage records
 INSERT INTO triage_records (

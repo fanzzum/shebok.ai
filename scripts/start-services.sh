@@ -22,11 +22,14 @@ if [[ -f "$ROOT/.env.local" ]]; then
   set +a
 fi
 
+# Define ML port based on loaded env or fallback to 5000
+ML_PORT="${ML_GATEWAY_PORT:-5000}"
+
 echo "Starting shebok.ai services..."
 echo ""
 
-# 1. ML Gateway (BanglaBERT + entity extraction) on :5000
-echo "Starting ML Gateway on :5000..."
+# 1. ML Gateway (BanglaBERT + entity extraction) on :$ML_PORT
+echo "Starting ML Gateway on :$ML_PORT..."
 cd "$ROOT/services/ml"
 python gateway.py &
 ML_PID=$!
@@ -46,7 +49,7 @@ TRIAGE_PID=$!
 echo ""
 echo "═══════════════════════════════════════════"
 echo "  shebok.ai services running:"
-echo "  ML Gateway        http://localhost:5000"
+echo "  ML Gateway        http://localhost:$ML_PORT"
 echo "  Emergency Gate    http://localhost:5003"
 echo "  Triage Service    http://localhost:5004"
 echo "═══════════════════════════════════════════"
