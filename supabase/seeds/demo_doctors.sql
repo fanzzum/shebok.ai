@@ -26,7 +26,7 @@ VALUES
   ),
   (
     'M. Islam',
-    'General Medicine',
+    'Medicine',
     23.7465,
     90.3760,
     25,
@@ -62,7 +62,7 @@ VALUES
   ),
   (
     'T. Ahmed',
-    'Orthopedics',
+    'Orthopaedic Surgery',
     23.7500,
     90.3920,
     20,
@@ -71,7 +71,7 @@ VALUES
   ),
   (
     'Z. Hassan',
-    'Dermatology',
+    'Dermatology & Venereology',
     23.7495,
     90.3850,
     22,

@@ -97,7 +97,7 @@ export const DEPARTMENT_COLORS: Record<string, string> = {
   Neurology: "#8b5cf6",
   Gastroenterology: "#f59e0b",
   Pulmonology: "#06b6d4",
-  "General Medicine": "#3b82f6",
+  Medicine: "#3b82f6",
   Orthopedics: "#10b981",
   Dermatology: "#ec4899",
   ENT: "#6366f1",

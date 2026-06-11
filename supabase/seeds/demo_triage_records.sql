@@ -42,7 +42,7 @@ VALUES
     'R50.9',
     'Patient presents with high-grade fever (103°F) for 3 days with associated headache and generalized body aches. Fatigue reported. No rash or bleeding signs. Dengue and typhoid to be ruled out given Dhaka prevalence.',
     3,
-    'General Medicine',
+    'Medicine',
     'Viral syndrome vs dengue. CBC with platelet count recommended.',
     'pending',
     false
@@ -84,7 +84,7 @@ VALUES
     'M17.9',
     'Patient reports chronic right knee pain for 2 months with intermittent swelling and difficulty walking, especially on stairs. No history of trauma. Possible osteoarthritis given age and presentation.',
     2,
-    'Orthopedics',
+    'Orthopaedic Surgery',
     'Chronic knee pain. X-ray and orthopedic evaluation recommended.',
     'resolved',
     false

@@ -81,7 +81,7 @@ When you have enough info (after 2-4 questions), output triage summary on a NEW 
 TRIAGE_COMPLETE:{{"chief_complaint":"...","department":"...","urgency_score":3,"summary":"..."}}
 
 urgency_score: 1=routine, 2=low, 3=moderate, 4=high, 5=critical
-department: Cardiology, Neurology, Gastroenterology, Pulmonology, General Medicine, Orthopedics, Dermatology, ENT, Gynecology, Pediatrics, Psychiatry, Ophthalmology, Urology
+department: Medicine, Surgery, Ophthalmology, Obstetrics & Gynaecology, Paediatrics, Otolaryngology - Head & Neck Surgery, Psychiatry, Anaesthesiology, Radiology & Imaging, Radiotherapy, Dermatology & Venereology, Physical Medicine & Rehabilitation, Haematology, Biochemistry, Pathology, Microbiology, Conservative Dentistry & Endodontics, Oral and Maxillofacial Surgery, Prosthodontics, Orthodontics & Dentofacial Orthopaedics, Transfusion Medicine, Family Medicine, Anatomy, Physiology, Pharmacology, Forensic Medicine, Community Medicine, Gastroenterology, Neurology, Nephrology, Endocrinology & Metabolism, Cardiology, Pulmonology, Hepatology, Rheumatology, Infectious Disease & Tropical Medicine, Urology, Neuro-surgery, Cardiovascular Surgery, Thoracic Surgery, Plastic and Reconstructive Surgery, Orthopaedic Surgery, Paediatric Surgery, Neonatology, Paediatric Haematology & Oncology, Paediatric Nephrology, Paediatric Gastroenterology & Nutrition, Paediatric Pulmonology, Paediatric Neurology & Development, Paediatric Cardiology, Feto-Maternal Medicine, Gynaecological Oncology, Reproductive Endocrinology & Infertility, Hepatobiliary Surgery, Colorectal Surgery, Surgical Oncology, Vitreo Retina, Paediatric Ophthalmology, Casualty and Emergency Surgery, Medical Oncology, Palliative Medicine, Paediatric Endocrinology and Metabolism, Paediatric Critical Care Medicine, Child and Adolescent Psychiatry, Female Pelvic Medicine and Reconstructive Surgery
 
 Do NOT output TRIAGE_COMPLETE until you have asked at least 2 follow-up questions.
 
@@ -241,7 +241,7 @@ def save_triage_record(patient_id: str, triage_data: dict, entities: dict, clini
         "icd10_code": entities.get("icd10_code"),
         "deepseek_summary": triage_data.get("summary", ""),
         "urgency_score": triage_data.get("urgency_score", 3),
-        "department": triage_data.get("department", entities.get("department", "General Medicine")),
+        "department": triage_data.get("department", entities.get("department", "Medicine")),
         "clinical_observation": clinical_obs,
         "status": "pending",
         "is_emergency": False,
@@ -427,7 +427,7 @@ def extract_entities(transcript: str) -> dict:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return json.loads(resp.read().decode())
     except Exception:
-        return {"symptoms": [], "body_locations": [], "severity_markers": [], "icd10_code": None, "department": "General Medicine"}
+        return {"symptoms": [], "body_locations": [], "severity_markers": [], "icd10_code": None, "department": "Medicine"}
 
 
 # ─── Conversation builders ──────────────────────────────────────────────────
@@ -587,9 +587,9 @@ def _handle_triage(session: dict, whatsapp_hash: str, user_text: str) -> dict:
         if not triage_data and new_turn >= MAX_TRIAGE_TURNS:
             triage_data = {
                 "chief_complaint": transcript[0]["content"] if transcript else user_text,
-                "department": "General Medicine",
+                "department": "Medicine",
                 "urgency_score": 3,
-                "summary": "Triage auto-completed after maximum turns. Routing to General Medicine.",
+                "summary": "Triage auto-completed after maximum turns. Routing to Medicine.",
             }
 
         # Extract entities from full transcript
@@ -609,7 +609,7 @@ def _handle_triage(session: dict, whatsapp_hash: str, user_text: str) -> dict:
             )
 
         # Get doctors for booking
-        department = triage_data.get("department", entities.get("department", "General Medicine"))
+        department = triage_data.get("department", entities.get("department", "Medicine"))
         # Match using full patient chief complaint and symptoms
         patient_summary_text = triage_data.get("summary", "") + " " + " ".join(entities.get("symptoms", []))
         doctors = get_doctors_semantically(patient_summary_text, department=department)

@@ -77,12 +77,12 @@ def main():
     # Map specialties to semantic descriptions to help PubMedBERT
     specialty_descriptions = {
         "Cardiology": "heart, chest pain, palpitations, arrhythmia, cardiovascular, blood pressure",
-        "General Medicine": "fever, cold, flu, general checkup, viral infection, headache, fatigue",
+        "Medicine": "fever, cold, flu, general checkup, viral infection, headache, fatigue",
         "Neurology": "brain, nerve, dizziness, migraine, stroke, numbness, paralysis",
         "Gastroenterology": "stomach, digestion, acid reflux, ulcer, diarrhea, vomiting, nausea, abdominal pain",
         "Pulmonology": "lungs, breathing, asthma, cough, shortness of breath, COPD, chest congestion",
-        "Orthopedics": "bone, joint, muscle, back pain, fracture, arthritis, injury, knee pain",
-        "Dermatology": "skin, hair, nail, rash, acne, allergy, itching, eczema"
+        "Orthopaedic Surgery": "bone, joint, muscle, back pain, fracture, arthritis, injury, knee pain",
+        "Dermatology & Venereology": "skin, hair, nail, rash, acne, allergy, itching, eczema"
     }
 
     print("Embedding doctors...")

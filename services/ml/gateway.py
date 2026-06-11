@@ -110,14 +110,14 @@ def extract_entities_biobert(text: str) -> dict:
             "body_locations": list(set(body_locations)),
             "severity_markers": list(set(severity)),
             "icd10_code": None, # Stubbed, could map via dictionary
-            "department": "General Medicine" # Passed separately usually
+            "department": "Medicine" # Passed separately usually
         }
-    except Exception as exc:
-        app.logger.error(f"BioBERT failed: {exc}")
-        return _empty_entities(str(exc))
+    except Exception as e:
+        app.logger.error(f"BioBERT failed: {e}")
+        return _empty_entities(str(e))
 
 def _empty_entities(reason: str = "") -> dict:
-    return {"symptoms": [], "body_locations": [], "severity_markers": [], "icd10_code": None, "department": "General Medicine", "_error": reason}
+    return {"symptoms": [], "body_locations": [], "severity_markers": [], "icd10_code": None, "department": "Medicine", "_error": reason}
 
 
 # ─── 3. S-PubMedBert (Semantic Embeddings) ──────────────────────────────────

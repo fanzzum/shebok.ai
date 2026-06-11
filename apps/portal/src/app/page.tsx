@@ -12,7 +12,7 @@ export default function LandingPage() {
       opacity: 1,
       transition: { staggerChildren: 0.2 },
     },
-  };
+  } as any;
 
   const itemVariants = {
     hidden: { opacity: 0, y: 20 },
@@ -21,7 +21,7 @@ export default function LandingPage() {
       y: 0,
       transition: { duration: 0.5, ease: "easeOut" },
     },
-  };
+  } as any;
 
   return (
     <div className="min-h-screen bg-[#0a0a0f] text-white overflow-hidden selection:bg-emerald-500/30">
