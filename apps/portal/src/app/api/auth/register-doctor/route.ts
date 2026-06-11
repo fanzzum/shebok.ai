@@ -11,8 +11,8 @@ export async function POST(request: Request) {
 
     // Initialize Supabase client with Service Role Key to bypass RLS
     const supabaseAdmin = createClient(
-      process.env.NEXT_PUBLIC_SUPABASE_URL!,
-      process.env.SUPABASE_SERVICE_ROLE_KEY!
+      process.env.NEXT_PUBLIC_SUPABASE_URL || "https://placeholder.supabase.co",
+      process.env.SUPABASE_SERVICE_ROLE_KEY || "placeholder"
     );
 
     // 1. Try to find a dummy doctor with matching name to link to
