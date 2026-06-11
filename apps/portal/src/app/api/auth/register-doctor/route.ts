@@ -5,7 +5,7 @@ export async function POST(request: Request) {
   try {
     const { userId, email, name, specialty, bmdc_reg } = await request.json();
 
-    if (!userId || !email || !name || !bmdc_reg) {
+    if (!userId || !email || !name) {
       return NextResponse.json({ error: "Missing required fields" }, { status: 400 });
     }
 
@@ -27,7 +27,7 @@ export async function POST(request: Request) {
       // 2. Link existing dummy doctor
       const { error: updateError } = await supabaseAdmin
         .from("doctor_registry")
-        .update({ auth_id: userId, email, bmdc_reg })
+        .update({ auth_id: userId, email })
         .eq("id", existingDoctor.id);
 
       if (updateError) throw updateError;
@@ -42,7 +42,6 @@ export async function POST(request: Request) {
           specialty: specialty || "Medicine",
           email,
           auth_id: userId,
-          bmdc_reg,
           clinic_lat: 23.75, // default Dhaka
           clinic_lng: 90.39,
         });

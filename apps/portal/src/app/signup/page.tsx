@@ -44,7 +44,6 @@ export default function SignupPage() {
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
   const [selectedSpecialties, setSelectedSpecialties] = useState<string[]>([]);
-  const [bmdcReg, setBmdcReg] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSuccess, setShowSuccess] = useState(false);
@@ -85,7 +84,6 @@ export default function SignupPage() {
           email: authData.user?.email,
           name,
           specialty: selectedSpecialties[0], // primary specialty
-          bmdc_reg: bmdcReg,
         }),
       });
 
@@ -159,18 +157,6 @@ export default function SignupPage() {
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
-              className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
-            />
-          </div>
-
-          <div>
-            <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider mb-1.5">BMDC Registration No.</label>
-            <input
-              type="text"
-              required
-              placeholder="e.g. A-12345"
-              value={bmdcReg}
-              onChange={(e) => setBmdcReg(e.target.value)}
               className="w-full bg-white/5 border border-white/10 rounded-xl px-4 py-3 text-sm focus:outline-none focus:border-emerald-500/50 focus:ring-1 focus:ring-emerald-500/50 transition-all"
             />
           </div>

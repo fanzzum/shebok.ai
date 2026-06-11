@@ -42,9 +42,13 @@ EMERGENCY_PID=$!
 
 # 3. Triage Orchestrator on :5004
 echo "Starting Triage Orchestrator on :5004..."
-cd "$ROOT/services/pipeline"
-python triage_service.py &
+cd "$ROOT"
+FLASK_APP=services/pipeline/triage_service.py python3 -m flask run --host=0.0.0.0 --port=5004 &
 TRIAGE_PID=$!
+
+echo "Starting Daily Reminder Bot..."
+python3 services/pipeline/reminder_bot.py &
+REMINDER_PID=$!
 
 echo ""
 echo "═══════════════════════════════════════════"
@@ -52,6 +56,7 @@ echo "  shebok.ai services running:"
 echo "  ML Gateway        http://localhost:$ML_PORT"
 echo "  Emergency Gate    http://localhost:5003"
 echo "  Triage Service    http://localhost:5004"
+echo "  Reminder Bot      [Background Service]"
 echo "═══════════════════════════════════════════"
 echo ""
 echo "Press Ctrl+C to stop all services."
@@ -60,8 +65,10 @@ echo "Press Ctrl+C to stop all services."
 cleanup() {
   echo ""
   echo "Stopping services..."
-  kill $ML_PID $EMERGENCY_PID $TRIAGE_PID 2>/dev/null || true
-  wait $ML_PID $EMERGENCY_PID $TRIAGE_PID 2>/dev/null || true
+  kill $ML_PID 2>/dev/null || true
+  kill $EMERGENCY_PID 2>/dev/null || true
+  kill $TRIAGE_PID 2>/dev/null || true
+  kill $REMINDER_PID 2>/dev/null || true
   echo "All services stopped."
 }
 trap cleanup EXIT INT TERM

@@ -31,6 +31,15 @@ export default function DashboardPage() {
   const [isPrescriptionModalOpen, setIsPrescriptionModalOpen] = useState(false);
   const [historicalPrescriptions, setHistoricalPrescriptions] = useState<Prescription[]>([]);
 
+  // Slots & BMDC State
+  const [slots, setSlots] = useState<{ time: string; location: string }[]>([]);
+  const [newTime, setNewTime] = useState("");
+  const [newLocation, setNewLocation] = useState("");
+  const [verificationUrl, setVerificationUrl] = useState("");
+  const [verifying, setVerifying] = useState(false);
+  const [visitingFee, setVisitingFee] = useState<number | "">("");
+  const [isEditingFee, setIsEditingFee] = useState(false);
+
   useEffect(() => {
     if (selectedRecord?.patient_id) {
       supabase.from("prescriptions")
@@ -63,6 +72,16 @@ export default function DashboardPage() {
       return;
     }
     setDoctor(doctorProfile as Doctor);
+    setVisitingFee(doctorProfile.visiting_fee || 1000);
+
+    let loadedSlots = doctorProfile.available_slots || [];
+    if (typeof loadedSlots === "string") {
+      try { loadedSlots = JSON.parse(loadedSlots); } catch (e) { loadedSlots = []; }
+    }
+    if (loadedSlots.length > 0 && typeof loadedSlots[0] === "string") {
+      loadedSlots = loadedSlots.map((s: string) => ({ time: s, location: "General Hospital" }));
+    }
+    setSlots(loadedSlots);
 
     // 3. Fetch specific data for this doctor
     const [triageRes, apptRes] = await Promise.all([
@@ -115,6 +134,86 @@ export default function DashboardPage() {
   const handleSignout = async () => {
     await supabase.auth.signOut();
     router.push("/");
+  };
+
+  const saveSlots = async (newSlots: any[]) => {
+    if (!doctor) return;
+    const { error } = await supabase
+      .from("doctor_registry")
+      .update({ available_slots: newSlots })
+      .eq("id", doctor.id);
+      
+    if (!error) {
+      setSlots(newSlots);
+    } else {
+      alert("Failed to save slots");
+    }
+  };
+
+  const saveFee = async () => {
+    if (!doctor || visitingFee === "") return;
+    const { error } = await supabase
+      .from("doctor_registry")
+      .update({ visiting_fee: Number(visitingFee) })
+      .eq("id", doctor.id);
+      
+    if (!error) {
+      // @ts-ignore
+      setDoctor({ ...doctor, visiting_fee: Number(visitingFee) });
+      setIsEditingFee(false);
+    } else {
+      alert("Failed to save visiting fee");
+    }
+  };
+
+  const addSlot = () => {
+    if (!newTime || !newLocation) return;
+    const updated = [...slots, { time: newTime, location: newLocation }];
+    setNewTime("");
+    setNewLocation("");
+    saveSlots(updated);
+  };
+
+  const removeSlot = (idx: number) => {
+    const updated = slots.filter((_, i) => i !== idx);
+    saveSlots(updated);
+  };
+
+  const verifyBmdc = async () => {
+    if (!verificationUrl || !doctor) return;
+    try {
+      setVerifying(true);
+      const parsed = new URL(verificationUrl);
+      if (!parsed.hostname.endsWith("bmdc.org.bd")) {
+        alert("Must be a valid bmdc.org.bd URL.");
+        setVerifying(false);
+        return;
+      }
+
+      setDoctor({ ...doctor, bmdc_verification_status: "PENDING" } as any);
+
+      const res = await fetch("/api/verify-bmdc", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: verificationUrl, doctor_id: doctor.id })
+      });
+      
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error);
+
+      const { data: updatedDoctor } = await supabase
+        .from("doctor_registry")
+        .select("*")
+        .eq("id", doctor.id)
+        .single();
+        
+      setDoctor(updatedDoctor as Doctor);
+      setVerificationUrl("");
+    } catch (e: any) {
+      alert("Verification Error: " + e.message);
+    } finally {
+      setVerifying(false);
+    }
   };
 
   if (loading) {
@@ -172,6 +271,131 @@ export default function DashboardPage() {
               <p className={`text-3xl font-bold ${s.color} mt-2`}>{s.value}</p>
             </div>
           ))}
+        </div>
+
+        {/* Doctor Settings & Verification */}
+        <div className="grid lg:grid-cols-[1fr_1fr] gap-6 mb-8">
+          
+          {/* Availability Card */}
+          <Card className="border-white/5 bg-white/[0.02]">
+            <CardHeader className="pb-3 border-b border-white/5">
+              <CardTitle className="text-lg flex justify-between items-center">
+                <span>Availability & Fees</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-zinc-400">Visiting Fee:</span>
+                  {isEditingFee ? (
+                    <div className="flex items-center gap-1">
+                      <input 
+                        type="number" 
+                        value={visitingFee} 
+                        onChange={(e) => setVisitingFee(e.target.value ? Number(e.target.value) : "")}
+                        className="bg-black/20 border border-white/10 rounded px-2 py-0.5 w-16 text-xs text-emerald-400 focus:outline-none"
+                      />
+                      <button onClick={saveFee} className="text-emerald-400 hover:text-emerald-300 text-xs px-1">Save</button>
+                      <button onClick={() => {
+                        // @ts-ignore
+                        setVisitingFee(doctor.visiting_fee || 1000);
+                        setIsEditingFee(false);
+                      }} className="text-zinc-500 hover:text-zinc-400 text-xs px-1">Cancel</button>
+                    </div>
+                  ) : (
+                    <div className="flex items-center gap-2">
+                      <Badge className="bg-emerald-500/10 text-emerald-400 border-none">
+                        {/* @ts-ignore */}
+                        {doctor.visiting_fee || 1000} BDT
+                      </Badge>
+                      <button onClick={() => setIsEditingFee(true)} className="text-zinc-500 hover:text-white text-xs">Edit</button>
+                    </div>
+                  )}
+                </div>
+              </CardTitle>
+              <CardDescription className="text-xs text-zinc-400">Manage your chamber times, locations, and fee.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 space-y-4">
+              <div className="space-y-2 max-h-40 overflow-y-auto pr-2 scrollbar-thin">
+                {slots.map((s, idx) => (
+                  <div key={idx} className="flex items-center justify-between p-2 rounded-md bg-black/20 border border-white/5 text-sm">
+                    <div>
+                      <div className="font-semibold text-emerald-400">{s.time}</div>
+                      <div className="text-xs text-zinc-400">{s.location}</div>
+                    </div>
+                    <button onClick={() => removeSlot(idx)} className="text-red-400 hover:text-red-300 text-xs px-2">Remove</button>
+                  </div>
+                ))}
+                {slots.length === 0 && <p className="text-xs text-zinc-500">No slots configured.</p>}
+              </div>
+
+              <div className="grid grid-cols-2 gap-2 pt-2 border-t border-white/5">
+                <input 
+                  className="bg-black/20 border border-white/10 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-500" 
+                  placeholder="Time (e.g. Today 4 PM)" 
+                  value={newTime} onChange={e => setNewTime(e.target.value)} 
+                />
+                <input 
+                  className="bg-black/20 border border-white/10 rounded px-2 py-1 text-sm text-white focus:outline-none focus:border-emerald-500" 
+                  placeholder="Location" 
+                  value={newLocation} onChange={e => setNewLocation(e.target.value)} 
+                />
+              </div>
+              <Button onClick={addSlot} disabled={!newTime || !newLocation} variant="outline" size="sm" className="w-full mt-2 border-white/10 text-emerald-400 hover:text-emerald-300">
+                + Add Slot
+              </Button>
+            </CardContent>
+          </Card>
+
+          {/* BMDC Verification Card */}
+          <Card className="border-white/5 bg-white/[0.02]">
+            <CardHeader className="pb-3 border-b border-white/5">
+              <CardTitle className="text-lg flex items-center justify-between">
+                <span>BMDC Verification</span>
+                {/* @ts-ignore */}
+                {doctor.bmdc_verification_status === "VALID" ? (
+                  <Badge className="bg-emerald-500/20 text-emerald-400 border-none text-[10px]">VERIFIED</Badge>
+                // @ts-ignore
+                ) : doctor.bmdc_verification_status === "PENDING" ? (
+                  <Badge className="bg-yellow-500/20 text-yellow-400 border-none text-[10px]">PENDING</Badge>
+                ) : (
+                  // @ts-ignore
+                  <Badge className="bg-red-500/20 text-red-400 border-none text-[10px]">{doctor.bmdc_verification_status || "UNVERIFIED"}</Badge>
+                )}
+              </CardTitle>
+              <CardDescription className="text-xs text-zinc-400">Verify your BMDC registry via AI compliance node.</CardDescription>
+            </CardHeader>
+            <CardContent className="p-4 space-y-4">
+              {/* @ts-ignore */}
+              {doctor.bmdc_verification_status !== "VALID" && (
+                <div className="space-y-3">
+                  <input 
+                    className="w-full bg-black/20 border border-white/10 rounded px-3 py-2 text-sm text-white focus:outline-none focus:border-emerald-500" 
+                    placeholder="https://verify.bmdc.org.bd/regdata/..." 
+                    value={verificationUrl} onChange={e => setVerificationUrl(e.target.value)} 
+                  />
+                  <Button onClick={verifyBmdc} disabled={verifying || !verificationUrl} size="sm" className="w-full bg-emerald-600 hover:bg-emerald-500 text-white">
+                    {verifying ? "Running Audit..." : "Run AI Compliance Audit"}
+                  </Button>
+                </div>
+              )}
+              {/* @ts-ignore */}
+              {doctor.bmdc_verification_response && (
+                <div className="p-3 bg-black/20 rounded-md border border-white/5 text-xs text-zinc-300 space-y-1">
+                  {/* @ts-ignore */}
+                  <p><span className="text-zinc-500">Name:</span> {doctor.bmdc_verification_response.extracted_credentials?.doctor_name}</p>
+                  {/* @ts-ignore */}
+                  <p><span className="text-zinc-500">Reg No:</span> {doctor.bmdc_verification_response.extracted_credentials?.bmdc_registration_number}</p>
+                  {/* @ts-ignore */}
+                  {doctor.bmdc_verification_response.audit_trail_reasons?.length > 0 && (
+                    <div className="mt-2 text-zinc-400">
+                      <span className="text-zinc-500">Audit Notes:</span>
+                      <ul className="list-disc pl-4 mt-1">
+                        {/* @ts-ignore */}
+                        {doctor.bmdc_verification_response.audit_trail_reasons.map((r: string, i: number) => <li key={i}>{r}</li>)}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         </div>
 
         {/* Division Layout: Appointments on left, Triage/Queue on Right */}

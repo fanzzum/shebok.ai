@@ -39,6 +39,8 @@ SUPABASE_URL = os.environ.get("NEXT_PUBLIC_SUPABASE_URL", "")
 SUPABASE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
 ML_GATEWAY_URL = os.environ.get("ML_GATEWAY_URL", "http://localhost:5000")
 EMERGENCY_GATE_URL = os.environ.get("EMERGENCY_GATE_URL", "http://localhost:5003")
+WHATSAPP_ACCESS_TOKEN = os.environ.get("WHATSAPP_ACCESS_TOKEN", "")
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
 MAX_TRIAGE_TURNS = 5
 
@@ -148,6 +150,191 @@ def _detect_language(transcript: list) -> str:
 
 # ─── Supabase helpers ────────────────────────────────────────────────────────
 
+def _process_audio(media_id: str) -> str:
+    """Download audio from WhatsApp and transcribe via Groq Whisper."""
+    import requests
+    import tempfile
+    
+    if not WHATSAPP_ACCESS_TOKEN or not GROQ_API_KEY:
+        app.logger.error("Missing WHATSAPP_ACCESS_TOKEN or GROQ_API_KEY for audio processing")
+        return ""
+        
+    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"}
+    res = requests.get(f"https://graph.facebook.com/v21.0/{media_id}", headers=headers)
+    if not res.ok:
+        app.logger.error("Failed to fetch media metadata: %s", res.text)
+        return ""
+        
+    media_url = res.json().get("url")
+    if not media_url:
+        return ""
+        
+    media_res = requests.get(media_url, headers=headers)
+    if not media_res.ok:
+        app.logger.error("Failed to download media: %s", media_res.text)
+        return ""
+        
+    with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as temp_audio:
+        temp_audio.write(media_res.content)
+        temp_audio_path = temp_audio.name
+        
+    try:
+        with open(temp_audio_path, "rb") as f:
+            transcribe_res = requests.post(
+                "https://api.groq.com/openai/v1/audio/transcriptions",
+                headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+                files={"file": (temp_audio_path, f, "audio/ogg")},
+                data={"model": "whisper-large-v3", "response_format": "json"}
+            )
+        if transcribe_res.ok:
+            return transcribe_res.json().get("text", "")
+        else:
+            app.logger.error("Whisper transcription failed: %s", transcribe_res.text)
+            return ""
+    except Exception as exc:
+        app.logger.error("Audio processing failed: %s", exc)
+        return ""
+    finally:
+        import os
+        if os.path.exists(temp_audio_path):
+            os.remove(temp_audio_path)
+
+
+def _process_image(media_id: str, patient_id: str) -> bool:
+    """Download image from WhatsApp, analyse via Gemini Vision, extract medicines."""
+    import requests
+    import base64
+
+    if not WHATSAPP_ACCESS_TOKEN or not GEMINI_API_KEY:
+        app.logger.error("Missing WHATSAPP_ACCESS_TOKEN or GEMINI_API_KEY for image processing")
+        return False
+
+    # 1. Download image from WhatsApp
+    headers = {"Authorization": f"Bearer {WHATSAPP_ACCESS_TOKEN}"}
+    res = requests.get(f"https://graph.facebook.com/v21.0/{media_id}", headers=headers, timeout=10)
+    if not res.ok:
+        app.logger.error("Failed to fetch image metadata: %s", res.text)
+        return False
+
+    media_url = res.json().get("url")
+    if not media_url:
+        return False
+
+    media_res = requests.get(media_url, headers=headers, timeout=15)
+    if not media_res.ok:
+        app.logger.error("Failed to download image: %s", media_res.text)
+        return False
+
+    # 2. Base64 encode the image for Gemini Vision
+    img_b64 = base64.b64encode(media_res.content).decode()
+    content_type = media_res.headers.get("Content-Type", "image/jpeg")
+
+    # 3. Send to Gemini 2.5 Flash for prescription extraction
+    vision_prompt = """You are a medical prescription reader. Analyse this prescription image carefully.
+
+Extract the following in STRICT JSON format ONLY (no explanation, no markdown fences):
+{
+  "doctor_summary": "A 1-2 sentence clinical summary of the diagnosis/notes written by the doctor",
+  "medicines": [
+    {
+      "medicine_name": "Full medicine name with dosage (e.g. Napa Extra 500mg)",
+      "breakfast": true or false,
+      "lunch": true or false,
+      "dinner": true or false,
+      "days": number_of_days
+    }
+  ]
+}
+
+Rules for meal slots:
+- "1+0+1" means breakfast=true, lunch=false, dinner=true
+- "0+0+1" means breakfast=false, lunch=false, dinner=true
+- "1+1+1" means breakfast=true, lunch=true, dinner=true
+- If dosage schedule is unclear, default to breakfast=true, lunch=false, dinner=true
+- If days is unclear, default to 7
+
+If the image is NOT a prescription (e.g. random photo), return: {"doctor_summary": "", "medicines": []}"""
+
+    try:
+        gemini_payload = {
+            "contents": [{
+                "parts": [
+                    {"text": vision_prompt},
+                    {"inline_data": {"mime_type": content_type, "data": img_b64}}
+                ]
+            }],
+            "generationConfig": {
+                "temperature": 0.1,
+                "maxOutputTokens": 1024,
+                "responseMimeType": "application/json"
+            }
+        }
+
+        gemini_url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+        vision_res = requests.post(gemini_url, json=gemini_payload, timeout=60)
+
+        if not vision_res.ok:
+            app.logger.error("Gemini Vision failed: %s", vision_res.text[:500])
+            return False
+
+        raw_text = vision_res.json()["candidates"][0]["content"]["parts"][0]["text"].strip()
+        app.logger.info("Prescription OCR raw: %s", raw_text[:500])
+
+        # Parse JSON from response (strip markdown fences if present)
+        json_text = raw_text
+        if "```" in json_text:
+            json_text = json_text.split("```")[1]
+            if json_text.startswith("json"):
+                json_text = json_text[4:]
+            json_text = json_text.strip()
+
+        parsed = json.loads(json_text)
+        summary = parsed.get("doctor_summary", "")
+        medicines = parsed.get("medicines", [])
+
+        if not medicines:
+            app.logger.warning("No medicines extracted from prescription image")
+            return False
+
+    except Exception as exc:
+        app.logger.error("Prescription image parsing failed: %s", exc)
+        return False
+
+    # 4. Update patient past_history
+    patient = _supabase_request("GET", f"patients?id=eq.{patient_id}&select=past_history")
+    if patient:
+        history = patient[0].get("past_history", [])
+        if isinstance(history, str):
+            history = json.loads(history)
+        if not isinstance(history, list):
+            history = []
+        history.append({
+            "date": datetime.now(timezone.utc).isoformat(),
+            "summary": summary,
+            "source": "WhatsApp Prescription Upload"
+        })
+        _supabase_request("PATCH", f"patients?id=eq.{patient_id}", {"past_history": history})
+
+    # 5. Insert into patient_medications
+    for med in medicines:
+        start_date = datetime.now(timezone.utc).date()
+        days = med.get("days", 7)
+        if not isinstance(days, int) or days <= 0:
+            days = 7
+        end_date = start_date + timedelta(days=days)
+        _supabase_request("POST", "patient_medications", {
+            "patient_id": patient_id,
+            "medicine_name": med.get("medicine_name", "Unknown"),
+            "breakfast": bool(med.get("breakfast", False)),
+            "lunch": bool(med.get("lunch", False)),
+            "dinner": bool(med.get("dinner", False)),
+            "start_date": start_date.isoformat(),
+            "end_date": end_date.isoformat()
+        })
+
+    return True
+
+
 def _supabase_request(method: str, path: str, data: dict | None = None) -> dict | list | None:
     """Make a request to Supabase REST API."""
     import urllib.request
@@ -219,16 +406,22 @@ def update_session(session_id: str, updates: dict) -> None:
     _supabase_request("PATCH", f"conversation_sessions?id=eq.{session_id}", updates)
 
 
-def get_or_create_patient(whatsapp_hash: str) -> str | None:
+def get_or_create_patient(whatsapp_hash: str, phone_number: str = None) -> str | None:
     """Get or create patient record, return patient_id."""
     import urllib.parse
 
     path = f"patients?whatsapp_hash=eq.{urllib.parse.quote(whatsapp_hash)}&limit=1"
     result = _supabase_request("GET", path)
     if result and len(result) > 0:
-        return result[0]["id"]
+        patient_id = result[0]["id"]
+        # Update phone number if not set but we have it
+        if phone_number and not result[0].get("phone_number"):
+            _supabase_request("PATCH", f"patients?id=eq.{patient_id}", {"phone_number": phone_number})
+        return patient_id
 
     new_patient = {"whatsapp_hash": whatsapp_hash}
+    if phone_number:
+        new_patient["phone_number"] = phone_number
     result = _supabase_request("POST", "patients", new_patient)
     return result[0]["id"] if result else None
 
@@ -477,11 +670,43 @@ def handle_message(phone_number: str, message_text: str, message_type: str = "te
     # Hash phone number (PII scrub)
     whatsapp_hash = hashlib.sha256(phone_number.encode()).hexdigest()
 
+    # 0. Greeting detection — reset session on hello/hi/salam so patient can start fresh
+    greeting_words = {"hello", "hi", "hey", "salam", "assalamu", "assalamualaikum", "hy"}
+    first_word = message_text.strip().lower().split()[0] if message_text.strip() else ""
+    is_greeting = first_word in greeting_words or message_text.strip().lower() in greeting_words
+    
+    if is_greeting:
+        # Force-reset any existing session
+        session = get_or_create_session(whatsapp_hash)
+        if session:
+            reset_data = {
+                "phase": "triage",
+                "turn_count": 0,
+                "scratchpad_xml": "",
+                "raw_transcript": json.dumps([]),
+                "doctor_options": None,
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "expires_at": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+            }
+            update_session(session["id"], reset_data)
+        
+        # Detect language from greeting
+        lang = "en"
+        if any(w in message_text.lower() for w in ["salam", "assalam"]):
+            lang = "bn"
+        
+        return {
+            "response_text": CHITCHAT_RESPONSES.get(lang, CHITCHAT_RESPONSES["en"]),
+            "state": "greeting_reset",
+            "is_complete": False,
+            "phase": "triage",
+        }
+
     # 1. Emergency check (always first — hard gate)
     emergency = check_emergency(message_text)
     if emergency.get("emergency_detected"):
         # Save emergency record
-        patient_id = get_or_create_patient(whatsapp_hash)
+        patient_id = get_or_create_patient(whatsapp_hash, phone_number)
         if patient_id:
             save_triage_record(
                 patient_id,
@@ -718,7 +943,12 @@ def _handle_booking(session: dict, whatsapp_hash: str, user_text: str) -> dict:
         slots = d.get("available_slots", [])
         if isinstance(slots, str):
             slots = json.loads(slots)
-        slot_str = ", ".join(slots[:3]) if slots else "next available"
+            
+        if slots and isinstance(slots[0], dict):
+            slot_str = ", ".join([f"{s.get('time')} @ {s.get('location', 'General Hospital')}" for s in slots[:3]])
+        else:
+            slot_str = ", ".join(slots[:3]) if slots else "next available"
+            
         doctor_list_str += f"{i+1}. Dr. {d['name']} — {d['specialty']} — Slots: {slot_str}\n"
 
     # Groq prompt that understands Banglish, Bengali, and English
@@ -804,6 +1034,20 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
     doctor_options_raw = session.get("doctor_options")
     doctor_options_dict = json.loads(doctor_options_raw) if isinstance(doctor_options_raw, str) else (doctor_options_raw or {})
     
+    # Try to extract the selected slot's location if it exists
+    slot_location = "General Hospital"
+    slots = selected_doctor.get("available_slots", [])
+    if isinstance(slots, str):
+        try:
+            slots = json.loads(slots)
+        except:
+            slots = []
+            
+    for s in slots:
+        if isinstance(s, dict) and s.get("time") == slot_time_str:
+            slot_location = s.get("location", "General Hospital")
+            break
+
     new_options = {
         "doctors": doctors,
         "triage_record_id": triage_record_id,
@@ -814,7 +1058,9 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
             "doctor_name": selected_doctor["name"],
             "specialty": selected_doctor["specialty"],
             "slot_iso": slot_iso,
-            "slot_time_str": slot_time_str
+            "slot_time_str": slot_time_str,
+            "location": slot_location,
+            "visiting_fee": selected_doctor.get("visiting_fee", 1000)
         }
     }
 
@@ -1018,6 +1264,8 @@ def _handle_verification(session: dict, whatsapp_hash: str, user_text: str) -> d
             f"✅ Verification successful! Appointment confirm hoye geche.\n\n"
             f"👨‍⚕️ Doctor: Dr. {pending['doctor_name']}\n"
             f"🏥 Department: {pending['specialty']}\n"
+            f"📍 Location: {pending.get('location', 'General Hospital')}\n"
+            f"💰 Fee: {pending.get('visiting_fee', 1000)} BDT\n"
             f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Apnar medical summary doctor er kache pathano hoyeche.\n"
             f"Shustho thakun!"
@@ -1027,6 +1275,8 @@ def _handle_verification(session: dict, whatsapp_hash: str, user_text: str) -> d
             f"✅ ভেরিফিকেশন সফল! অ্যাপয়েন্টমেন্ট নিশ্চিত হয়েছে।\n\n"
             f"👨‍⚕️ ডাক্তার: Dr. {pending['doctor_name']}\n"
             f"🏥 বিভাগ: {pending['specialty']}\n"
+            f"📍 চেম্বার: {pending.get('location', 'General Hospital')}\n"
+            f"💰 ফি: {pending.get('visiting_fee', 1000)} টাকা\n"
             f"🕐 সময়: {pending['slot_time_str']}\n\n"
             f"আপনার মেডিকেল সামারি ডাক্তারের কাছে পাঠানো হয়েছে।\n"
             f"সুস্থ থাকুন!"
@@ -1036,6 +1286,8 @@ def _handle_verification(session: dict, whatsapp_hash: str, user_text: str) -> d
             f"✅ Verification successful! Appointment Confirmed.\n\n"
             f"👨‍⚕️ Doctor: Dr. {pending['doctor_name']}\n"
             f"🏥 Department: {pending['specialty']}\n"
+            f"📍 Location: {pending.get('location', 'General Hospital')}\n"
+            f"💰 Fee: {pending.get('visiting_fee', 1000)} Tk\n"
             f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Your medical summary has been sent to the doctor.\n"
             f"Stay healthy!"
@@ -1062,8 +1314,22 @@ def _format_doctor_options(doctors: list, department: str, lang: str = "bn") -> 
         slots = doc.get("available_slots", [])
         if isinstance(slots, str):
             slots = json.loads(slots)
-        slot_str = ", ".join(slots[:3]) if slots else ("next available" if lang != "bn" else "পরবর্তী উপলব্ধ সময়")
+        
+        # New format: [{"time": "...", "location": "..."}]
+        if slots and isinstance(slots[0], dict):
+            slot_str = ", ".join([f"{s.get('time')} @ {s.get('location', 'General Hospital')}" for s in slots[:3]])
+        else:
+            # Fallback for old string format
+            slot_str = ", ".join(slots[:3]) if slots else ("next available" if lang != "bn" else "পরবর্তী উপলব্ধ সময়")
+            
         lines.append(f"{i+1}. Dr. {doc['name']} — {doc['specialty']}")
+        fee = doc.get("visiting_fee", 1000)
+        if lang == "banglish":
+            lines.append(f"   💰 Fee: {fee} Tk")
+        elif lang == "bn":
+            lines.append(f"   💰 ফি: {fee} টাকা")
+        else:
+            lines.append(f"   💰 Fee: {fee} BDT")
         lines.append(f"   🕐 Available: {slot_str}\n")
 
     if lang == "banglish":
@@ -1102,16 +1368,53 @@ def message():
     if not phone_number or not message_text:
         return jsonify({"error": "phone_number and message_text required"}), 400
 
+    if message_type == "audio":
+        audio_text = _process_audio(message_text)
+        if not audio_text:
+            return jsonify({
+                "response_text": "দুঃখিত, আপনার ভয়েস মেসেজটি বুঝতে সমস্যা হয়েছে। দয়া করে লিখে জানান। (Sorry, I couldn't process your voice message. Please type it out.)",
+                "state": "error",
+                "is_complete": False,
+                "phase": "triage"
+            })
+        message_text = audio_text
+        message_type = "text"  # Treat transcribed audio as normal text downstream
+        
+    if message_type == "image":
+        whatsapp_hash = hashlib.sha256(phone_number.encode()).hexdigest()
+        patient_id = get_or_create_patient(whatsapp_hash, phone_number)
+        if not patient_id:
+            return jsonify({"error": "could not get patient"}), 500
+            
+        success = _process_image(message_text, patient_id)
+        if success:
+            return jsonify({
+                "response_text": "আপনার প্রেসক্রিপশনটি সফলভাবে সেভ করা হয়েছে এবং প্রতিদিন ভোর ৪টায় আপনাকে ঔষধের রিমাইন্ডার পাঠানো হবে। (Your prescription is saved. Daily reminders are set for 4:00 AM.)",
+                "state": "prescription_saved",
+                "is_complete": True,
+                "phase": "triage"
+            })
+        else:
+            return jsonify({
+                "response_text": "দুঃখিত, আপনার প্রেসক্রিপশনটি পড়তে সমস্যা হয়েছে। পরিষ্কার ছবি দিন। (Sorry, couldn't read the prescription. Please upload a clear photo.)",
+                "state": "error",
+                "is_complete": False,
+                "phase": "triage"
+            })
+
     try:
         result = handle_message(phone_number, message_text, message_type)
         return jsonify(result)
     except Exception as exc:
-        app.logger.error("Message handling failed: %s\n%s", exc, traceback.format_exc())
+        trace = traceback.format_exc()
+        app.logger.error("Message handling failed: %s\n%s", exc, trace)
+        with open("error.log", "w") as f:
+            f.write(trace)
         return jsonify({
             "response_text": "দুঃখিত, সিস্টেমে সমস্যা হয়েছে। আবার চেষ্টা করুন।",
             "state": "error",
             "error_detail": str(exc),
-            "traceback": traceback.format_exc(),
+            "traceback": trace,
             "is_complete": False,
             "phase": "error",
         })

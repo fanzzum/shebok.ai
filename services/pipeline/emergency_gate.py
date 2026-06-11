@@ -30,6 +30,31 @@ You must respond with a raw JSON object and nothing else. Do not include markdow
 Format: {"emergency_score": <int>, "reason": "<brief_clinical_justification>"}"""
 
 def check_emergency_llm(text: str) -> dict:
+    text_lower = text.lower()
+    
+    # ── Fast keyword gate — catches obvious emergencies without waiting for LLM ──
+    EMERGENCY_KEYWORDS = [
+        "bleeding heavily", "bleeding profusely", "heavy bleeding", "blood everywhere",
+        "unconscious", "not breathing", "can't breathe", "cant breathe",
+        "heart attack", "chest pain", "stroke", "seizure", "convulsion",
+        "choking", "overdose", "poisoning", "suicide", "suicidal",
+        "hit my head", "head injury", "accident", "crash",
+        "broken bone", "bone sticking out", "deep cut", "deep wound",
+        "রক্ত", "রক্তক্ষরণ", "অজ্ঞান", "শ্বাস", "বুকে ব্যথা",
+        "rokto", "roktokhoron", "ogyaan", "shash", "buke betha",
+        "bleeding", "matha fere geche", "matha betha", "rokto porche",
+    ]
+    
+    for keyword in EMERGENCY_KEYWORDS:
+        if keyword in text_lower:
+            return {
+                "emergency_detected": True,
+                "primary_clinical_observation": f"Keyword match: '{keyword}' detected in message",
+                "emergency_score": 5,
+                "source": "keyword_gate",
+            }
+    
+    # ── LLM-based ESI scoring for non-obvious cases ──
     api_key = os.environ.get("GROQ_API_KEY", "")
     if not api_key:
         return {
@@ -70,7 +95,7 @@ def check_emergency_llm(text: str) -> dict:
         parsed = json.loads(match.group(0) if match else content)
         
         score = parsed.get("emergency_score", 1)
-        is_emergency = score >= 4
+        is_emergency = score >= 3  # Lowered threshold: ESI 3+ triggers emergency
         
         return {
             "emergency_detected": is_emergency,
