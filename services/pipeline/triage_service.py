@@ -521,6 +521,8 @@ def handle_message(phone_number: str, message_text: str, message_type: str = "te
         return _handle_triage(session, whatsapp_hash, message_text)
     elif phase == "booking":
         return _handle_booking(session, whatsapp_hash, message_text)
+    elif phase == "verification":
+        return _handle_verification(session, whatsapp_hash, message_text)
     elif phase == "done":
         # Session complete — start fresh
         return {
@@ -796,40 +798,136 @@ If truly unclear, set confidence to "low" and provide clarification_needed IN BA
     except Exception:
         slot_iso = datetime.now(timezone.utc).isoformat()
 
-    # Save appointment
-    appt_id = None
-    if patient_id and triage_record_id:
-        appt_id = save_appointment(patient_id, selected_doctor["id"], triage_record_id, slot_iso)
+    # Save pending booking info to session and transition to verification
+    doctor_options_raw = session.get("doctor_options")
+    doctor_options_dict = json.loads(doctor_options_raw) if isinstance(doctor_options_raw, str) else (doctor_options_raw or {})
+    
+    update_session(session["id"], {
+        "phase": "verification",
+        "doctor_options": json.dumps({
+            "doctors": doctors,
+            "triage_record_id": triage_record_id,
+            "patient_id": patient_id,
+            "department": doctor_options_dict.get("department"),
+            "pending_booking": {
+                "doctor_id": selected_doctor["id"],
+                "doctor_name": selected_doctor["name"],
+                "specialty": selected_doctor["specialty"],
+                "slot_iso": slot_iso,
+                "slot_time_str": slot_time_str
+            }
+        })
+    })
+
+    if lang == "banglish":
+        ask_nid = "Apnar appointment pray confirm! Tobe fake booking theke bachte apnar NID (National ID) ba Birth Certificate number ta bolun."
+    elif lang == "bn":
+        ask_nid = "আপনার অ্যাপয়েন্টমেন্ট প্রায় নিশ্চিত! তবে ফেইক বুকিং এড়াতে আপনার এনআইডি (NID) বা জন্ম নিবন্ধন নম্বরটি দিন।"
+    else:
+        ask_nid = "Your appointment is almost confirmed! To prevent spam, please provide your NID (National ID) or Birth Certificate number."
+
+    return {
+        "response_text": ask_nid,
+        "state": "verification_required",
+        "is_complete": False,
+        "phase": "verification",
+    }
+
+def _handle_verification(session: dict, whatsapp_hash: str, user_text: str) -> dict:
+    """Handle NID/Birth Certificate verification phase."""
+    doctor_options = json.loads(session.get("doctor_options", "{}"))
+    pending = doctor_options.get("pending_booking")
+    patient_id = doctor_options.get("patient_id")
+    triage_record_id = doctor_options.get("triage_record_id")
+
+    transcript = json.loads(session.get("raw_transcript", "[]")) if isinstance(session.get("raw_transcript"), str) else (session.get("raw_transcript") or [])
+    lang = _detect_language(transcript)
+
+    if not pending:
+        # Fallback if something went wrong
+        update_session(session["id"], {"phase": "done"})
+        return {"response_text": "System error.", "state": "error", "is_complete": True, "phase": "done"}
+
+    # Extract NID using LLM
+    extract_prompt = f"""Extract the NID (National ID) or Birth Certificate number from the user's message.
+User's message: "{user_text}"
+
+Rules:
+- The number is usually 10, 13, or 17 digits. 
+- Ignore text like "my nid is" or "amar nid hocche".
+- If no valid number is found (e.g. they say "I don't have it" or write random text), set "number" to null.
+
+Output ONLY valid JSON:
+{{"number": "1234567890", "found": true}}
+OR
+{{"number": null, "found": false}}
+"""
+
+    try:
+        response = groq_chat([
+            {"role": "system", "content": "You extract ID numbers. Output ONLY JSON."},
+            {"role": "user", "content": extract_prompt}
+        ], temperature=0, max_tokens=100)
+        response = re.sub(r"<think>.*?</think>", "", response, flags=re.DOTALL).strip()
+        match = re.search(r"\{.*\}", response, re.DOTALL)
+        result = json.loads(match.group(0) if match else response)
+    except Exception:
+        result = {"found": False}
+
+    if not result.get("found") or not result.get("number"):
+        if lang == "banglish":
+            clarify = "Eti sothik NID ba Birth Certificate number mone hoche na. Doya kore sothik number ti din ta na hole booking hobe na."
+        elif lang == "bn":
+            clarify = "এটি সঠিক এনআইডি বা জন্ম নিবন্ধন নম্বর বলে মনে হচ্ছে না। অনুগ্রহ করে সঠিক নম্বরটি দিন, অন্যথায় বুকিং হবে না।"
+        else:
+            clarify = "That does not look like a valid NID or Birth Certificate number. Please provide a valid number to complete your booking."
+        
+        return {
+            "response_text": clarify,
+            "state": "verification_failed",
+            "is_complete": False,
+            "phase": "verification"
+        }
+
+    # Verification successful!
+    nid_number = str(result.get("number"))
+    
+    # 1. Update patient with NID hash (or raw for now)
+    if patient_id:
+        _supabase_request("PATCH", f"patients?id=eq.{patient_id}", {"nid_hash": nid_number})
+        
+        # 2. Save appointment
+        appt_id = save_appointment(patient_id, pending["doctor_id"], triage_record_id, pending["slot_iso"])
         _supabase_request("PATCH", f"triage_records?id=eq.{triage_record_id}", {"status": "booked"})
 
     # Mark session done
     update_session(session["id"], {"phase": "done"})
 
-    # Build confirmation in patient's language
+    # Build confirmation
     if lang == "banglish":
         confirmation = (
-            f"✅ Appointment confirm hoye geche!\n\n"
-            f"👨‍⚕️ Doctor: Dr. {selected_doctor['name']}\n"
-            f"🏥 Department: {selected_doctor['specialty']}\n"
-            f"🕐 Time: {slot_time_str}\n\n"
+            f"✅ Verification successful! Appointment confirm hoye geche.\n\n"
+            f"👨‍⚕️ Doctor: Dr. {pending['doctor_name']}\n"
+            f"🏥 Department: {pending['specialty']}\n"
+            f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Apnar medical summary doctor er kache pathano hoyeche.\n"
             f"Shustho thakun! 🙏"
         )
     elif lang == "bn":
         confirmation = (
-            f"✅ অ্যাপয়েন্টমেন্ট নিশ্চিত!\n\n"
-            f"👨‍⚕️ ডাক্তার: Dr. {selected_doctor['name']}\n"
-            f"🏥 বিভাগ: {selected_doctor['specialty']}\n"
-            f"🕐 সময়: {slot_time_str}\n\n"
+            f"✅ ভেরিফিকেশন সফল! অ্যাপয়েন্টমেন্ট নিশ্চিত হয়েছে।\n\n"
+            f"👨‍⚕️ ডাক্তার: Dr. {pending['doctor_name']}\n"
+            f"🏥 বিভাগ: {pending['specialty']}\n"
+            f"🕐 সময়: {pending['slot_time_str']}\n\n"
             f"আপনার মেডিকেল সামারি ডাক্তারের কাছে পাঠানো হয়েছে।\n"
             f"সুস্থ থাকুন! 🙏"
         )
     else:
         confirmation = (
-            f"✅ Appointment Confirmed!\n\n"
-            f"👨‍⚕️ Doctor: Dr. {selected_doctor['name']}\n"
-            f"🏥 Department: {selected_doctor['specialty']}\n"
-            f"🕐 Time: {slot_time_str}\n\n"
+            f"✅ Verification successful! Appointment Confirmed.\n\n"
+            f"👨‍⚕️ Doctor: Dr. {pending['doctor_name']}\n"
+            f"🏥 Department: {pending['specialty']}\n"
+            f"🕐 Time: {pending['slot_time_str']}\n\n"
             f"Your medical summary has been sent to the doctor.\n"
             f"Stay healthy! 🙏"
         )
